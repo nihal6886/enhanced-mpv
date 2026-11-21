@@ -64,8 +64,8 @@ Source: "staging\firefox\enhanced-mpv-firefox.xpi"; DestDir: "{app}\firefox"; Fl
 Source: "staging\mpv-config\*"; DestDir: "{app}\mpv"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; --- on-demand dependencies (downloaded into {tmp} when winget is absent) --
-Source: "{tmp}\yt-dlp.exe"; DestDir: "{app}\bin"; Flags: external ignoreversion skipifsourcedoesntexist; Check: NeedYtDlpFile
-Source: "{tmp}\mpv.7z"; DestDir: "{localappdata}\Programs\mpv"; Flags: external extractarchive recursesubdirs createallsubdirs ignoreversion skipifsourcedoesntexist; Check: NeedMpvFile
+Source: "{tmp}\yt-dlp.exe"; DestDir: "{app}\bin"; Flags: external ignoreversion skipifsourcedoesntexist; Check: WantYtDlpArchiveFile
+Source: "{tmp}\mpv.7z"; DestDir: "{localappdata}\Programs\mpv"; Flags: external extractarchive recursesubdirs createallsubdirs ignoreversion skipifsourcedoesntexist; Check: WantMpvArchiveFile
 
 [Icons]
 Name: "{userprograms}\Enhanced MPV\Setup Guide"; Filename: "{app}\onboarding\index.html"
@@ -273,12 +273,12 @@ begin
     or FileExists(ExpandConstant('{app}\bin\yt-dlp.exe'));
 end;
 
-function NeedMpvFile(Param: String): Boolean;
+function WantMpvArchiveFile(Param: String): Boolean;
 begin
   Result := WantMpvArchive and FileExists(ExpandConstant('{tmp}\mpv.7z'));
 end;
 
-function NeedYtDlpFile(Param: String): Boolean;
+function WantYtDlpArchiveFile(Param: String): Boolean;
 begin
   Result := WantYtDlpArchive and FileExists(ExpandConstant('{tmp}\yt-dlp.exe'));
 end;
@@ -460,7 +460,7 @@ begin
   if WantModernZFont then
     DownloadPage.Add(CModernZFontUrl, 'modernz-icons.ttf', '');
 
-  if DownloadPage.Enabled = False then
+  if (not WantYtDlpArchive) and (not WantMpvArchive) and (not WantModernZLua) and (not WantModernZFont) then
     Exit;
 
   DownloadPage.Show;
@@ -688,8 +688,7 @@ begin
   AppFont := AddBackslash(ExpandConstant('{app}\mpv')) + 'fonts\modernz-icons.ttf';
   TmpLua := ExpandConstant('{tmp}\modernz.lua');
   TmpFont := ExpandConstant('{tmp}\modernz-icons.ttf');
-  { Prefer the offline copies bundled in {app}\mpv from the staging payload;
-    fall back to the {tmp} download if the offline copy is missing. }
+  // Prefer offline copies in app\mpv; fall back to tmp download.
   if WantModernZLua then
   begin
     if FileExists(AppLua) then
