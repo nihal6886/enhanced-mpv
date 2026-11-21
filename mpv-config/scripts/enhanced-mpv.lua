@@ -89,6 +89,8 @@ end
 local function warm_standby_quit()
   local cfg = user_config()
   if cfg.keepWarm then
+    -- "stop" unloads the file, so save-position-on-quit never fires; save first.
+    mp.commandv("write-watch-later-config")
     mp.commandv("stop")
     mp.set_property("force-window", "no")
     mp.set_property("window-minimized", "yes")
@@ -395,7 +397,14 @@ local function reload_stream()
   local path = mp.get_property("path")
   local pos = mp.get_property_number("time-pos") or 0
   if not path then return end
-  mp.commandv("loadfile", path, "replace", "start=" .. string.format("%.3f", pos))
+  -- The loadfile options argument moved (mpv 0.38 added an index), so seek
+  -- after the reload instead of passing start= positionally.
+  local function seek_back()
+    mp.unregister_event(seek_back)
+    if pos > 0 then mp.commandv("seek", tostring(pos), "absolute+exact") end
+  end
+  mp.register_event("file-loaded", seek_back)
+  mp.commandv("loadfile", path, "replace")
   toast("Reloading stream...", 1.5)
 end
 
