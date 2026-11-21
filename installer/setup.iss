@@ -20,6 +20,7 @@
 #define GeckoId "enhanced-mpv@enhanced-mpv.local"
 
 [Setup]
+ArchiveExtraction=enhanced
 AppId={{7E4C1A92-6B3D-4F58-9E21-C0A4D5F6B781}
 AppName=Enhanced MPV
 AppVersion={#AppVersion}
