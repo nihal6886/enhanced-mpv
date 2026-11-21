@@ -48,7 +48,6 @@ RestartApplications=no
 SetupLogging=yes
 ; "basic" is Inno Setup's default 7-Zip extractor; it covers the non-encrypted
 ; .7z archives we download for mpv. (Requires Inno Setup 6.5+ for extractarchive.)
-ArchiveExtraction=basic
 DisableWelcomePage=no
 
 [Languages]
