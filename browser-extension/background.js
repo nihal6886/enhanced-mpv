@@ -709,8 +709,10 @@ function addVideo(tabId, url, extra) {
   }
 }
 
+// Called once the playlist body proved to be a media playlist (no
+// #EXT-X-STREAM-INF): undo a filename-based master guess (root /<id>.m3u8,
+// index.m3u8, master.m3u8) so it pairs with captured audio.
 function demoteRootManifestCandidate(tabId, url) {
-  if (!isRootManifestCandidate(url) || isMasterManifestUrl(url)) return false;
   const state = getState(tabId);
   const idx = state.videos.findIndex(v => v.url.split("?")[0] === url.split("?")[0]);
   if (idx < 0) return false;
