@@ -6,7 +6,7 @@
 .DESCRIPTION
   Produces every artifact the Smart Web Installer needs:
 
-    dist\enhanced-mpv-host.exe        native messaging host (pkg, node20-win-x64)
+    dist\enhanced-mpv-host.exe        native messaging host (pkg, node20.18.1-win-x64)
     dist\enhanced-mpv-extension.zip   unpacked Chromium extension (manifest.json at root)
     dist\enhanced-mpv-firefox.xpi     Firefox add-on (manifest.json at root)
     installer\staging\...             offline payload tree consumed by installer\setup.iss
@@ -18,7 +18,7 @@
   powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1
 #>
 param(
-  [string]$PkgTarget = "node20-win-x64",
+  [string]$PkgTarget = "node20.18.1-win-x64",
   [string]$PkgPackage = "@yao-pkg/pkg",
   [switch]$SkipPkg,
   [switch]$SkipExtension,
