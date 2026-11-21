@@ -827,13 +827,6 @@ async function play(payload, mode) {
     ? payload.subtitleFiles.filter(isSafeLocalPath)
     : [];
 
-  appendLaunchLog("[" + new Date().toISOString() + "] play mode=" + (wantQueue ? "queue" : "replace") +
-    " startTime=" + resumeStart(payload.startTime, payload.duration) +
-    " duration=" + (Number.isFinite(Number(payload.duration)) ? Number(payload.duration) : 0) +
-    " source=" + String(payload.startTimeSource || "none").slice(0, 200) +
-    " url=" + String(url).replace(/[?&](?:sign|token|KEY\d+)=[^&]*/g, "<redacted>") +
-    " audioUrl=" + String(audioUrl || "").replace(/[?&](?:sign|token|KEY\d+)=[^&]*/g, "<redacted>"));
-
   // Split HLS video + audio behind auth: relay both through localhost so every
   // playlist, key, init segment, and media segment carries the tab's headers.
   const audioUrl = payload.audioUrl && isSafeUrl(payload.audioUrl) ? payload.audioUrl : null;
@@ -844,6 +837,13 @@ async function play(payload, mode) {
   const needsVideoRelay = videoIsHls && videoHeaders.some((h) => /^(Cookie|Referer|Origin|User-Agent):/i.test(h));
   const needsAudioRelay = audioIsHls && Object.keys(audioAuth).length > 0;
   const launchPayload = { ...payload, audioUrl };
+
+  appendLaunchLog("[" + new Date().toISOString() + "] play mode=" + (wantQueue ? "queue" : "replace") +
+    " startTime=" + resumeStart(payload.startTime, payload.duration) +
+    " duration=" + (Number.isFinite(Number(payload.duration)) ? Number(payload.duration) : 0) +
+    " source=" + String(payload.startTimeSource || "none").slice(0, 200) +
+    " url=" + String(url).replace(/[?&](?:sign|token|KEY\d+)=[^&]*/g, "<redacted>") +
+    " audioUrl=" + String(audioUrl || "").replace(/[?&](?:sign|token|KEY\d+)=[^&]*/g, "<redacted>"));
 
   if (videoIsHls && audioIsHls && (needsVideoRelay || needsAudioRelay)) {
     try {
