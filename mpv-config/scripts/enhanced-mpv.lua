@@ -16,19 +16,6 @@ local opts = {
 }
 options.read_options(opts, "enhanced_mpv")
 
--- Warm standby: when keepWarm=true in config, 'q' should stop playback
--- and return to idle (force-window=no) instead of quitting mpv.
-local function warm_standby_quit()
-  local cfg = user_config()
-  if cfg.keepWarm then
-    mp.commandv("stop")
-    mp.set_property("force-window", "no")
-    mp.set_property("window-minimized", "yes")
-    return
-  end
-  mp.commandv("quit")
-end
-
 local bookmarks = {}
 local clipboard_timer = nil
 local last_clip = ""
@@ -95,6 +82,21 @@ end
 
 local function user_config()
   return load_json(utils.join_path(cfg_dir(), "config.json")) or {}
+end
+
+-- Warm standby: when keepWarm=true in config, 'q' should stop playback
+-- and return to idle (force-window=no) instead of quitting mpv.
+local function warm_standby_quit()
+  local cfg = user_config()
+  if cfg.keepWarm then
+    -- "stop" unloads the file, so save-position-on-quit never fires; save first.
+    mp.commandv("write-watch-later-config")
+    mp.commandv("stop")
+    mp.set_property("force-window", "no")
+    mp.set_property("window-minimized", "yes")
+    return
+  end
+  mp.commandv("quit")
 end
 
 local function run_async(args, timeout, cb)
@@ -395,7 +397,14 @@ local function reload_stream()
   local path = mp.get_property("path")
   local pos = mp.get_property_number("time-pos") or 0
   if not path then return end
-  mp.commandv("loadfile", path, "replace", "start=" .. string.format("%.3f", pos))
+  -- The loadfile options argument moved (mpv 0.38 added an index), so seek
+  -- after the reload instead of passing start= positionally.
+  local function seek_back()
+    mp.unregister_event(seek_back)
+    if pos > 0 then mp.commandv("seek", tostring(pos), "absolute+exact") end
+  end
+  mp.register_event("file-loaded", seek_back)
+  mp.commandv("loadfile", path, "replace")
   toast("Reloading stream...", 1.5)
 end
 
@@ -462,11 +471,9 @@ local function parse_srt(data)
       t0 = tonumber(a1) * 3600 + tonumber(b1) * 60 + tonumber(a2) + tonumber(b2) / 1000
       t1 = tonumber(c1) * 3600 + tonumber(d1) * 60 + tonumber(c2) + tonumber(d2) / 1000
       text = ""
-    elseif line:match("^%d+$") then
-      -- cue index
     elseif line == "" then
       flush()
-    elseif t0 then
+    elseif t0 and not line:match("^%d+$") then -- skip bare cue indices
       text = (text == "" or not text) and line or (text .. " " .. line)
     end
   end

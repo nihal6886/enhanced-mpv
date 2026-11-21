@@ -34,6 +34,7 @@ function isYtdlPage(url) {
 }
 
 const MAX_STREAMS_PER_TAB = 15;
+const MASTER_BASE = 1500;
 
 /**
  * Deterministic multi-feature stream scoring & audio pairing.
@@ -91,7 +92,7 @@ function scoreStreamCandidate(url, headers, tabId, allVideos = []) {
 
   if (isMasterManifest) {
     kind = "hls-master";
-    score += 1500;
+    score += MASTER_BASE;
 
     // Resolution weight from URL hints
     if (/(2160|4k|uhd)/i.test(u)) score += 400;
@@ -136,6 +137,8 @@ function scoreStreamCandidate(url, headers, tabId, allVideos = []) {
       audioUrl = audioCandidates[0].url;
       score += 200; // bonus for having paired audio
     }
+    // A sub-playlist must never tie or outrank the lowest master manifest.
+    score = Math.min(score, MASTER_BASE - 1);
     return { score, kind, audioUrl, manifestInfo: null };
   }
 

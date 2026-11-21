@@ -17,3 +17,4 @@ browser-extension/icons/*.png
 # Private extension key (never commit)
 extension-key.pem
 scripts/extension-key.pem
+*.patch

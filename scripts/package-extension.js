@@ -34,7 +34,7 @@ function copyManifest(kind) {
     manifest.browser_specific_settings = {
       gecko: {
         id: "enhanced-mpv@enhanced-mpv.local",
-        strict_min_version: "121.0",
+        strict_min_version: "128.0",
       },
     };
   }

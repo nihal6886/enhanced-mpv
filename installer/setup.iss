@@ -1,12 +1,12 @@
 ; ============================================================================
-;  Enhanced MPV - Smart Web Installer (Inno Setup 6.5+)
+;  Enhanced MPV - Smart Web Installer (Inno Setup 6.7+)
 ;
 ;  Consumes the offline payload produced by scripts\build-release.ps1
 ;  (installer\staging\...) and stays well under the 20 MB budget by never
 ;  bundling mpv/yt-dlp: they are resolved on demand via winget, with a direct
 ;  GitHub release download as a fallback.
 ;
-;  Compile:  iscc /DExtId="docojpbeobpfjdfhlfjhdijfnbekfpob" installer\setup.iss
+;  Compile:  iscc /DExtId="oaholhjabdiapfijakeojjjoideniecl" installer\setup.iss
 ; ============================================================================
 
 #ifndef ExtId
@@ -26,7 +26,7 @@ AppName=Enhanced MPV
 AppVersion={#AppVersion}
 AppVerName=Enhanced MPV {#AppVersion}
 AppPublisher=Enhanced MPV
-AppPublisherURL=https://github.com/enhanced-mpv
+AppPublisherURL=https://github.com/nihal6886/enhanced-mpv
 DefaultDirName={localappdata}\Programs\Enhanced MPV
 DefaultGroupName=Enhanced MPV
 DisableProgramGroupPage=yes
@@ -46,8 +46,8 @@ UninstallDisplayIcon={app}\host\enhanced-mpv-host.exe
 CloseApplications=no
 RestartApplications=no
 SetupLogging=yes
-; "basic" is Inno Setup's default 7-Zip extractor; it covers the non-encrypted
-; .7z archives we download for mpv. (Requires Inno Setup 6.5+ for extractarchive.)
+; ArchiveExtraction=enhanced (top of [Setup]) uses the full 7-Zip extractor
+; for the BCJ2/LZMA2 .7z mpv builds we download (Inno Setup 6.5+, tested 6.7).
 DisableWelcomePage=no
 
 [Languages]

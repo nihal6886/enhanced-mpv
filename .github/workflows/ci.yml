@@ -16,7 +16,7 @@ jobs:
           node-version: "20"
 
       - name: Install JavaScript dependencies
-        run: npm install
+        run: npm ci
 
       - name: Unit tests
         run: npm test
@@ -28,7 +28,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y lua-check
 
       - name: Luacheck
-        run: luacheck mpv-config/scripts
+        run: npm run lint:lua
+
+      - name: Doctor (report only; CI has no mpv install)
+        run: node native-host/doctor.js || true
 
       - name: Package extension artifacts
         run: npm run package

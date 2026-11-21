@@ -23,13 +23,24 @@ local start_time = 0
 
 -- Neon green #4ADE80, dark studio #0E1014
 local NEON_GREEN = "#4ADE80"
-local DARK_BG = "#0E1014"
 local TEXT_WHITE = "#FFFFFF"
 local TEXT_MUTED = "#888888"
 
 -- Pulse animation for buffering step
 local pulse_timer = nil
 local pulse_state = 0
+
+-- ASS colours are &HBBGGRR&, not #RRGGBB.
+local function ass_color(hex)
+  local r, g, b = hex:match("^#(%x%x)(%x%x)(%x%x)$")
+  if not r then return "&HFFFFFF&" end
+  return "&H" .. b .. g .. r .. "&"
+end
+
+-- Strip ASS override braces from untrusted text (media titles, errors).
+local function ass_text(s)
+  return (tostring(s or ""):gsub("[{}]", ""):gsub("\n", " "))
+end
 
 local function format_time(seconds)
   if not seconds or seconds <= 0 then return "0:00" end
@@ -43,41 +54,36 @@ local function format_time(seconds)
   end
 end
 
+local function step_line(done, active_text, done_text)
+  local color = done and NEON_GREEN or TEXT_MUTED
+  local icon = done and "✓" or "•"
+  return string.format("{\\an7\\fs20\\b0\\bord0\\shad0\\1c%s}%s  %s",
+    ass_color(color), icon, done and done_text or active_text)
+end
+
 local function build_ass()
   local title = media_title ~= "" and media_title or "Connecting stream..."
   local resume_text = ""
   if start_time > 0 then
-    resume_text = string.format("  {\\1c&H%s&}▸ Resume at %s", NEON_GREEN:sub(2), format_time(start_time))
+    resume_text = string.format("  {\\1c%s}▸ Resume at %s", ass_color(NEON_GREEN), format_time(start_time))
   end
+  local lines = {
+    string.format("{\\an7\\fs36\\b1\\bord0\\shad0\\1c%s}%s%s", ass_color(TEXT_WHITE), ass_text(title), resume_text),
+    string.format("{\\an7\\fs18\\b0\\bord0\\shad0\\1c%s}Enhanced MPV", ass_color(TEXT_MUTED)),
+    "",
+    step_line(steps_state.verified, "Verifying stream & headers...", "Stream & headers verified"),
+    step_line(steps_state.subtitles, "Linking subtitles & audio...", "Subtitles & audio linked"),
+    string.format("{\\an7\\fs20\\b0\\bord0\\shad0\\1c%s}•  Buffering first frame%s",
+      ass_color(NEON_GREEN), string.rep(".", pulse_state)),
+  }
+  return table.concat(lines, "\n")
+end
 
-  -- Step 1: Stream & headers verified
-  local step1_icon = steps_state.verified and "{\\1c&H" .. NEON_GREEN:sub(2) .. "}\\uE8FB" or "{\\1c&H" .. TEXT_MUTED .. "}\\uE8FB"
-  local step1_color = steps_state.verified and NEON_GREEN or TEXT_MUTED
-  local step1_text = steps_state.verified and "Stream & headers verified" or "Verifying stream & headers..."
-
-  -- Step 2: Subtitles & audio linked
-  local step2_icon = steps_state.subtitles and "{\\1c&H" .. NEON_GREEN:sub(2) .. "}\\uE8FB" or "{\\1c&H" .. TEXT_MUTED .. "}\\uE8FB"
-  local step2_color = steps_state.subtitles and NEON_GREEN or TEXT_MUTED
-  local step2_text = steps_state.subtitles and "Subtitles & audio linked" or "Linking subtitles & audio..."
-
-  -- Step 3: Buffering first frame (pulsing)
-  local pulse_dots = string.rep(".", pulse_state)
-  local step3_icon = "{\\1c&H" .. NEON_GREEN:sub(2) .. "}\\uE8FA"
-  local step3_text = "Buffering first frame" .. pulse_dots
-
-  local ass = string.format([[
-{\an7\fs36\b1\bord0\shad0\1c&H%s&}%s%s
-{\an7\fs18\b0\bord0\shad0\1c&H%s&}%s
-
-{\an7\fs20\b0\bord0\shad0\1c&H%s&}%s  {\\1c&H%s&}%s
-{\an7\fs20\b0\bord0\shad0\1c&H%s&}%s  {\\1c&H%s&}%s
-{\an7\fs20\b0\bord0\shad0\1c&H%s&}%s  {\\1c&H%s&}%s
-]], TEXT_WHITE, title, resume_text, TEXT_MUTED, "Enhanced MPV",
-  step1_color, step1_icon, step1_text,
-  step2_color, step2_icon, step2_text,
-  step3_color, step3_icon, step3_text)
-
-  return ass
+-- Requested resume point (--start / loadfile start option), e.g. "+42" or "42".
+local function requested_start()
+  local raw = mp.get_property("start") or ""
+  local n = tonumber((raw:gsub("^%+", "")))
+  return n or 0
 end
 
 local function show_loading()
@@ -85,10 +91,7 @@ local function show_loading()
   loading_active = true
   steps_state = { verified = false, subtitles = false, buffering = true }
   media_title = mp.get_property("media-title") or ""
-  start_time = mp.get_property_number("start-time") or 0
-  if start_time <= 0 then
-    start_time = mp.get_property_number("time-pos") or 0
-  end
+  start_time = requested_start()
 
   overlay.data = build_ass()
   overlay:update()
@@ -129,11 +132,11 @@ local function show_error(message)
   loading_active = false
   if pulse_timer then pulse_timer:stop() end
 
-  local ass = string.format([[
-{\an5\fs36\b1\bord0\shad0\1c&H%s&}Stream failed to load
-{\an5\fs20\b0\bord0\shad0\1c&H%s&}%s
-{\an5\fs18\b0\bord0\shad0\1c&H%s&}Press Fallback in the extension or try again
-]], NEON_GREEN, TEXT_MUTED, message, TEXT_MUTED)
+  local ass = table.concat({
+    string.format("{\\an5\\fs36\\b1\\bord0\\shad0\\1c%s}Stream failed to load", ass_color(NEON_GREEN)),
+    string.format("{\\an5\\fs20\\b0\\bord0\\shad0\\1c%s}%s", ass_color(TEXT_MUTED), ass_text(message)),
+    string.format("{\\an5\\fs18\\b0\\bord0\\shad0\\1c%s}Press Fallback in the extension or try again", ass_color(TEXT_MUTED)),
+  }, "\n")
 
   overlay.data = ass
   overlay:update()
@@ -174,9 +177,10 @@ mp.register_event("playback-restart", function()
 end)
 
 mp.register_event("end-file", function(event)
-  if event and event.reason and event.reason ~= "eof" and event.reason ~= "quit" then
-    local reason = event.reason or "unknown error"
-    show_error(reason)
+  -- Only real failures show the error card; "stop" (loadfile replace),
+  -- "redirect" (yt-dlp playlists), "eof", and "quit" are normal transitions.
+  if event and event.reason == "error" then
+    show_error(event.file_error or "unknown error")
   else
     hide_loading()
   end

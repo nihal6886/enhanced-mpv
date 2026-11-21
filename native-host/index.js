@@ -4,8 +4,9 @@ const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const { encodeMessage, createFramer } = require("./protocol");
-const { play, findMpv, startRelay, attachAudio } = require("./mpv-launcher");
-const { readConfig, writeConfig, configDir, ensureDir } = require("./config");
+const { play, findMpv, attachAudio, ipcAlive, spawnMpv } = require("./mpv-launcher");
+const relay = require("./stream-relay");
+const { readConfig, writeConfig, configDir, ensureDir, ipcPath } = require("./config");
 const { isSafeUrl } = require("./sanitizer");
 const { parseFilename } = require("./filename-parser");
 const { convertSubtitle } = require("./vtt-converter");
@@ -206,7 +207,7 @@ async function handle(msg) {
         return { ok: false, error: "missing url or headers", code: "BAD_URL", command: [] };
       }
       try {
-        const relayUrl = await startRelay(url, headers);
+        const relayUrl = await relay.startRelay(url, headers);
         return { ok: true, error: null, code: "OK", relayUrl, command: [] };
       } catch (err) {
         return { ok: false, error: err.message, code: "RELAY_FAILED", command: [] };
@@ -231,18 +232,54 @@ async function prewarmMpv() {
   if (!cfg.keepWarm) {
     return { ok: true, error: null, code: "OK", warmed: false, command: [] };
   }
-  // Check if already warmed via IPC
-  const { ipcAlive } = require("./mpv-launcher");
   if (await ipcAlive()) {
     return { ok: true, error: null, code: "OK", warmed: true, command: [] };
   }
-  // Spawn warm mpv
-  const { spawnMpv } = require("./mpv-launcher");
-  const { ipcPath } = require("./config");
   const warmArgs = ["--idle=yes", "--force-window=no", "--input-ipc-server=" + ipcPath()];
   if (cfg.profile) warmArgs.push("--profile=" + cfg.profile);
   spawnMpv(mpvBin, warmArgs);
   return { ok: true, error: null, code: "OK", warmed: true, command: [] };
+}
+
+// Detached relay helper (spawned by mpv-launcher): read one JSON request from
+// stdin, start the relay, print its URL, and keep serving until every relay
+// has been idle long enough to be cleaned up.
+function runRelayDaemon() {
+  let input = "";
+  let started = false;
+  const reply = (obj) => {
+    try { process.stdout.write(JSON.stringify(obj) + "\n"); } catch { /* parent gone */ }
+  };
+  process.stdout.on("error", () => {});
+  process.stdin.on("error", () => {});
+  process.stdin.on("data", async (chunk) => {
+    if (started) return;
+    input += chunk.toString("utf8");
+    const nl = input.indexOf("\n");
+    if (nl < 0) return;
+    started = true;
+    try {
+      const req = JSON.parse(input.slice(0, nl));
+      let out;
+      if (req.kind === "master") {
+        const r = await relay.startMasterRelay(req.videoUrl, req.videoHeaders || {}, req.audioUrl, req.audioHeaders || {});
+        out = { ok: true, masterRelayUrl: r.masterRelayUrl };
+      } else {
+        out = { ok: true, relayUrl: await relay.startRelay(req.url, req.headers || {}) };
+      }
+      for (const entry of relay.activeRelays.values()) {
+        if (entry.server) entry.server.ref();
+      }
+      reply(out);
+    } catch (err) {
+      reply({ ok: false, error: String((err && err.message) || err) });
+      process.exit(1);
+    }
+  });
+  setInterval(() => {
+    relay.cleanupOldRelays();
+    if (started && relay.activeRelays.size === 0) process.exit(0);
+  }, 30000);
 }
 
 function startClipboardWatch() {
@@ -276,6 +313,10 @@ function startClipboardWatch() {
 }
 
 function main() {
+  if (process.argv.includes("--relay-daemon")) {
+    runRelayDaemon();
+    return;
+  }
   ensureDir(configDir());
   if (process.argv.includes("--clipboard-watch")) {
     startClipboardWatch();

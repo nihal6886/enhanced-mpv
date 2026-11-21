@@ -171,219 +171,243 @@ async function fetchSegmentsConcurrently(urls, headers, options = {}) {
   });
 }
 
+const PLAYLIST_CT_RE = /mpegurl|x-mpegurl|vnd\.apple\.mpegurl/i;
+const RELAY_IDLE_MS = 10 * 60 * 1000;
+const MAX_REDIRECTS = 5;
+
+function isRelayedUri(uri) {
+  return /^https?:\/\/127\.0\.0\.1:\d+\//.test(uri);
+}
+
 function rewriteManifestUrls(text, base, manifestBaseUrl) {
-  // Rewrite both absolute URLs (http://...) and relative URLs
-  // First, handle absolute URLs
-  text = text.replace(/^(https?:\/\/[^\s]+)$/gm, (match) => {
-    return base + encodeURIComponent(match);
-  });
-  // Then handle relative URLs (non-comment, non-empty lines that don't start with http)
+  // CRLF playlists would otherwise never match the line-anchored patterns.
+  text = String(text).replace(/\r\n?/g, "\n");
+  // URI lines (segments, variant playlists): absolute or relative, resolved
+  // against the playlist URL and routed through the relay.
   text = text.replace(/^([^#\s][^\s]*)$/gm, (match) => {
-    // Skip if already an absolute URL (already handled above)
-    if (/^https?:\/\//.test(match)) return match;
-    // Skip if it's a data URI or other special scheme
-    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(match)) return match;
-    // Resolve relative URL against manifest base URL
+    if (isRelayedUri(match)) return match;
+    if (!/^https?:\/\//i.test(match) && /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(match)) return match; // data:, skd:, etc.
     try {
       const absoluteUrl = new URL(match, manifestBaseUrl).toString();
       return base + encodeURIComponent(absoluteUrl);
     } catch {
-      return match; // If resolution fails, leave as-is
+      return match;
     }
   });
 
   // Rewrite quoted URI="..." attributes inside #EXT-X-MEDIA (audio/subtitle
-  // renditions), #EXT-X-KEY (AES-128 decryption keys), and #EXT-X-MAP
-  // (fMP4 init segments) so every rendition/key/init segment resolves against
-  // the playlist base URL and routes through the authenticated relay with the
-  // tab's session headers/cookies. Skip URIs already routed through this relay.
+  // renditions), #EXT-X-KEY (AES-128 decryption keys), #EXT-X-MAP (fMP4 init
+  // segments), and I-frame playlists so every rendition/key/init segment
+  // resolves against the playlist base URL and carries the tab's session
+  // headers. Non-HTTP key schemes (skd:, data:) and already-relayed URIs are
+  // left untouched.
   text = text.replace(/(URI=")([^"]+)(")/g, (match, prefix, uri, suffix) => {
-    if (/^https?:\/\/127\.0\.0\.1:\d+\//.test(uri)) return match; // already relayed
+    if (isRelayedUri(uri)) return match;
+    if (!/^https?:\/\//i.test(uri) && /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(uri)) return match;
     try {
       const absoluteUrl = new URL(uri, manifestBaseUrl).toString();
       return prefix + base + encodeURIComponent(absoluteUrl) + suffix;
     } catch {
-      return match; // leave unparseable URIs untouched
+      return match;
     }
   });
 
   return text;
 }
 
-function createRelayServer(manifestUrl, headers, token) {
+// Open an upstream response (following safe redirects) without buffering, so
+// large segments stream straight to mpv and Range requests keep working.
+function openUpstream(url, headers, redirects = 0) {
   return new Promise((resolve, reject) => {
-    const server = http.createServer(async (req, res) => {
-      const reqUrl = new URL(req.url, `http://127.0.0.1`);
-      const pathParts = reqUrl.pathname.split("/").filter(Boolean);
+    if (!isSafeUrl(url)) {
+      reject(new Error("unsafe URL"));
+      return;
+    }
+    const lib = url.startsWith("https:") ? https : http;
+    const req = lib.get(url, { headers, timeout: RELAY_TIMEOUT_MS, agent: relayAgent(url) }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        if (redirects >= MAX_REDIRECTS) {
+          reject(new Error("too many redirects"));
+          return;
+        }
+        let next;
+        try {
+          next = new URL(res.headers.location, url).toString();
+        } catch {
+          reject(new Error("unsafe redirect"));
+          return;
+        }
+        openUpstream(next, headers, redirects + 1).then(resolve, reject);
+        return;
+      }
+      resolve({ res, finalUrl: url });
+    });
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.on("error", reject);
+  });
+}
 
-      // Verify token
+function readBody(res) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    res.on("data", (c) => chunks.push(c));
+    res.on("end", () => resolve(Buffer.concat(chunks)));
+    res.on("error", reject);
+  });
+}
+
+function looksLikePlaylist(url, contentType) {
+  if (PLAYLIST_CT_RE.test(contentType || "")) return true;
+  try {
+    return /\.m3u8?$/i.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
+function sendPlaylist(res, text) {
+  res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Cache-Control", "no-store");
+  res.writeHead(200);
+  res.end(text);
+}
+
+// Fetch a playlist with the tab's headers and rewrite every URI through `base`.
+async function relayPlaylist(res, playlistUrl, headers, base) {
+  const { res: upstream, finalUrl } = await openUpstream(playlistUrl, headers);
+  if (upstream.statusCode !== 200 && upstream.statusCode !== 206) {
+    upstream.resume();
+    res.writeHead(502);
+    res.end("Manifest fetch failed");
+    return;
+  }
+  const body = await readBody(upstream);
+  sendPlaylist(res, rewriteManifestUrls(body.toString("utf8"), base, finalUrl));
+}
+
+// Proxy one resource. Nested playlists (variant / rendition playlists reached
+// from a master) are rewritten too, so their segments, keys, and init
+// segments also go through the authenticated relay.
+async function relayResource(req, res, resourceUrl, headers, base) {
+  const upstreamHeaders = { ...headers };
+  if (req.headers.range) upstreamHeaders.Range = req.headers.range;
+  const { res: upstream, finalUrl } = await openUpstream(resourceUrl, upstreamHeaders);
+  if (upstream.statusCode !== 200 && upstream.statusCode !== 206) {
+    upstream.resume();
+    res.writeHead(502);
+    res.end("Segment fetch failed");
+    return;
+  }
+  const contentType = upstream.headers["content-type"] || "";
+  if (looksLikePlaylist(finalUrl, contentType)) {
+    const body = await readBody(upstream);
+    const text = body.toString("utf8");
+    if (text.trimStart().startsWith("#EXTM3U")) {
+      sendPlaylist(res, rewriteManifestUrls(text, base, finalUrl));
+      return;
+    }
+    res.setHeader("Content-Type", contentType || "application/octet-stream");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.writeHead(upstream.statusCode);
+    res.end(body);
+    return;
+  }
+  res.setHeader("Content-Type", contentType || "video/mp2t");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  for (const h of ["content-length", "content-range", "accept-ranges"]) {
+    if (upstream.headers[h]) res.setHeader(h, upstream.headers[h]);
+  }
+  res.writeHead(upstream.statusCode);
+  upstream.pipe(res);
+  res.on("close", () => upstream.destroy());
+}
+
+// One localhost relay server per playlist. `key` is the activeRelays entry,
+// `prefix` the URL path below the token (e.g. "video" for sub-relays).
+function createPlaylistRelay(manifestUrl, headers, token, prefix, key) {
+  return new Promise((resolve, reject) => {
+    const entry = { manifestUrl, headers, createdAt: Date.now(), lastAccess: Date.now() };
+    const server = http.createServer(async (req, res) => {
+      entry.lastAccess = Date.now();
+      if (entry.owner) entry.owner.lastAccess = entry.lastAccess;
+      const reqUrl = new URL(req.url, "http://127.0.0.1");
+      const pathParts = reqUrl.pathname.split("/").filter(Boolean);
       if (pathParts[0] !== token) {
         res.writeHead(403);
         res.end("Invalid token");
         return;
       }
-
-      const resource = pathParts.slice(1).join("/");
-
-      if (resource === "index.m3u8" || resource === "") {
-        try {
-          const response = await fetchWithHeaders(manifestUrl, headers);
-          if (response.statusCode !== 200 && response.statusCode !== 206) {
-            res.writeHead(502);
-            res.end("Manifest fetch failed");
-            return;
-          }
-          let text = response.body.toString("utf8");
-
-          // Rewrite segment URLs to point through this relay
-          const base = `http://127.0.0.1:${server.address().port}/${token}/`;
-          text = rewriteManifestUrls(text, base, manifestUrl);
-
-          res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-          res.setHeader("Access-Control-Allow-Origin", "*");
-          res.writeHead(200);
-          res.end(text);
-        } catch (err) {
-          res.writeHead(502);
-          res.end("Manifest fetch error: " + err.message);
-        }
-        return;
-      }
-
-      // Segment request - proxy the segment
+      let resource = pathParts.slice(1).join("/");
+      if (prefix && resource.startsWith(prefix + "/")) resource = resource.slice(prefix.length + 1);
+      else if (prefix && resource === prefix) resource = "";
+      const base = `http://127.0.0.1:${server.address().port}/${token}/${prefix ? prefix + "/" : ""}`;
       try {
-        const segmentUrl = decodeURIComponent(resource);
-        if (!isSafeUrl(segmentUrl)) {
+        if (resource === "index.m3u8" || resource === "") {
+          await relayPlaylist(res, manifestUrl, headers, base);
+          return;
+        }
+        const resourceUrl = decodeURIComponent(resource);
+        if (!isSafeUrl(resourceUrl)) {
           res.writeHead(400);
           res.end("Invalid segment URL");
           return;
         }
-        const response = await fetchWithHeaders(segmentUrl, headers);
-        if (response.statusCode !== 200 && response.statusCode !== 206) {
-          res.writeHead(502);
-          res.end("Segment fetch failed");
-          return;
-        }
-        res.setHeader("Content-Type", response.headers["content-type"] || "video/mp2t");
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        res.writeHead(response.statusCode);
-        res.end(response.body);
+        await relayResource(req, res, resourceUrl, headers, base);
       } catch (err) {
-        res.writeHead(502);
-        res.end("Segment fetch error: " + err.message);
+        if (!res.headersSent) {
+          res.writeHead(502);
+          res.end("Relay fetch error: " + err.message);
+        } else {
+          res.destroy();
+        }
       }
     });
 
+    server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const port = server.address().port;
-      const relayUrl = `http://127.0.0.1:${port}/${token}/index.m3u8`;
-      activeRelays.set(token, { server, manifestUrl, headers, createdAt: Date.now() });
+      const relayUrl = `http://127.0.0.1:${port}/${token}/${prefix ? prefix + "/" : ""}index.m3u8`;
+      entry.server = server;
+      activeRelays.set(key, entry);
       server.unref();
-      resolve({ relayUrl, port, token });
+      scheduleCleanup();
+      resolve({ relayUrl, port, token: key });
     });
-
-    server.on("error", reject);
-
-    // Cleanup old relays periodically
-    setTimeout(() => cleanupOldRelays(), 60000);
   });
 }
 
+function createRelayServer(manifestUrl, headers, token) {
+  return createPlaylistRelay(manifestUrl, headers, token, "", token);
+}
+
+function createSubRelay(manifestUrl, headers, token, subPath) {
+  return createPlaylistRelay(manifestUrl, headers, token, subPath, token + "-" + subPath);
+}
+
+let cleanupTimer = null;
+function scheduleCleanup() {
+  if (cleanupTimer) return;
+  cleanupTimer = setInterval(cleanupOldRelays, 60000);
+  cleanupTimer.unref();
+}
+
+// Close relays that mpv has not touched for RELAY_IDLE_MS (a playing stream
+// keeps requesting segments/playlists, so active playback is never cut), then
+// cap the number of live relays by evicting the least recently used.
 function cleanupOldRelays() {
   const now = Date.now();
-  for (const [token, relay] of activeRelays.entries()) {
-    if (now - relay.createdAt > RELAY_TIMEOUT_MS) {
-      relay.server.close();
-      activeRelays.delete(token);
-    }
+  const lastSeen = (relay) => relay.lastAccess || relay.createdAt;
+  for (const [token, relay] of [...activeRelays.entries()]) {
+    if (relay.isSubRelay) continue;
+    if (now - lastSeen(relay) > RELAY_IDLE_MS) stopRelay(token);
   }
-  if (activeRelays.size > MAX_RELAYS) {
-    // Close oldest
-    const oldest = [...activeRelays.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt)[0];
-    oldest[1].server.close();
-    activeRelays.delete(oldest[0]);
+  const owners = [...activeRelays.entries()].filter(([, r]) => !r.isSubRelay);
+  while (owners.length > MAX_RELAYS) {
+    owners.sort((a, b) => lastSeen(a[1]) - lastSeen(b[1]));
+    stopRelay(owners.shift()[0]);
   }
-}
-
-async function createSubRelay(manifestUrl, headers, token, subPath) {
-  return new Promise((resolve, reject) => {
-    const server = http.createServer(async (req, res) => {
-      const reqUrl = new URL(req.url, `http://127.0.0.1`);
-      const pathParts = reqUrl.pathname.split("/").filter(Boolean);
-
-      // Verify token
-      if (pathParts[0] !== token) {
-        res.writeHead(403);
-        res.end("Invalid token");
-        return;
-      }
-
-      // Remove subPath prefix from resource if present
-      let resource = pathParts.slice(1).join("/");
-      if (resource.startsWith(subPath + "/")) {
-        resource = resource.slice(subPath.length + 1);
-      }
-
-      if (resource === "index.m3u8" || resource === "") {
-        try {
-          const response = await fetchWithHeaders(manifestUrl, headers);
-          if (response.statusCode !== 200 && response.statusCode !== 206) {
-            res.writeHead(502);
-            res.end("Manifest fetch failed");
-            return;
-          }
-          let text = response.body.toString("utf8");
-
-          // Rewrite segment URLs to point through this relay
-          const base = `http://127.0.0.1:${server.address().port}/${token}/${subPath}/`;
-          text = rewriteManifestUrls(text, base, manifestUrl);
-
-          res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-          res.setHeader("Access-Control-Allow-Origin", "*");
-          res.writeHead(200);
-          res.end(text);
-        } catch (err) {
-          res.writeHead(502);
-          res.end("Manifest fetch error: " + err.message);
-        }
-        return;
-      }
-
-      // Segment request - proxy the segment
-      try {
-        const segmentUrl = decodeURIComponent(resource);
-        if (!isSafeUrl(segmentUrl)) {
-          res.writeHead(400);
-          res.end("Invalid segment URL");
-          return;
-        }
-        const response = await fetchWithHeaders(segmentUrl, headers);
-        if (response.statusCode !== 200 && response.statusCode !== 206) {
-          res.writeHead(502);
-          res.end("Segment fetch failed");
-          return;
-        }
-        res.setHeader("Content-Type", response.headers["content-type"] || "video/mp2t");
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        res.writeHead(response.statusCode);
-        res.end(response.body);
-      } catch (err) {
-        res.writeHead(502);
-        res.end("Segment fetch error: " + err.message);
-      }
-    });
-
-    server.listen(0, "127.0.0.1", () => {
-      const port = server.address().port;
-      const relayUrl = `http://127.0.0.1:${port}/${token}/${subPath}/index.m3u8`;
-      activeRelays.set(token + "-" + subPath, { server, manifestUrl, headers, createdAt: Date.now() });
-      server.unref();
-      resolve({ relayUrl, port, token: token + "-" + subPath });
-    });
-
-    server.on("error", reject);
-    setTimeout(() => cleanupOldRelays(), 60000);
-  });
 }
 
 async function startMasterRelay(videoUrl, videoHeaders, audioUrl, audioHeaders) {
@@ -391,19 +415,44 @@ async function startMasterRelay(videoUrl, videoHeaders, audioUrl, audioHeaders) 
   const videoToken = generateToken();
   const audioToken = generateToken();
 
-  // Start video sub-relay
-  const { relayUrl: videoRelayUrl, port: videoPort } = await createSubRelay(videoUrl, videoHeaders, videoToken, "video");
-
-  // Start audio sub-relay
-  const { relayUrl: audioRelayUrl, port: audioPort } = await createSubRelay(audioUrl, audioHeaders, audioToken, "audio");
+  const videoSub = await createSubRelay(videoUrl, videoHeaders, videoToken, "video");
+  let audioSub;
+  try {
+    audioSub = await createSubRelay(audioUrl, audioHeaders, audioToken, "audio");
+  } catch (err) {
+    stopRelay(videoSub.token);
+    throw err;
+  }
+  const { relayUrl: videoRelayUrl, port: videoPort } = videoSub;
+  const { relayUrl: audioRelayUrl, port: audioPort } = audioSub;
 
   // Create master relay that serves the synthesized master manifest
   return new Promise((resolve, reject) => {
-    const server = http.createServer(async (req, res) => {
-      const reqUrl = new URL(req.url, `http://127.0.0.1`);
+    const entry = {
+      videoUrl,
+      videoHeaders,
+      audioUrl,
+      audioHeaders,
+      videoToken,
+      audioToken,
+      videoPort,
+      audioPort,
+      createdAt: Date.now(),
+      lastAccess: Date.now(),
+    };
+    // Segment traffic on either sub-relay keeps the whole pair alive.
+    for (const key of [videoSub.token, audioSub.token]) {
+      const sub = activeRelays.get(key);
+      if (sub) {
+        sub.isSubRelay = true;
+        sub.owner = entry;
+      }
+    }
+    const server = http.createServer((req, res) => {
+      entry.lastAccess = Date.now();
+      const reqUrl = new URL(req.url, "http://127.0.0.1");
       const pathParts = reqUrl.pathname.split("/").filter(Boolean);
 
-      // Verify master token
       if (pathParts[0] !== masterToken) {
         res.writeHead(403);
         res.end("Invalid token");
@@ -411,48 +460,37 @@ async function startMasterRelay(videoUrl, videoHeaders, audioUrl, audioHeaders) 
       }
 
       const resource = pathParts.slice(1).join("/");
-
       if (resource === "master.m3u8" || resource === "") {
-        // Synthesize master manifest
-        const masterManifest = `#EXTM3U
-#EXT-X-VERSION:3
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Default",DEFAULT=YES,AUTOSELECT=YES,URI="${audioRelayUrl}"
-#EXT-X-STREAM-INF:BANDWIDTH=8000000,AUDIO="audio"
-${videoRelayUrl}`;
-
-        res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        res.writeHead(200);
-        res.end(masterManifest);
+        const masterManifest = [
+          "#EXTM3U",
+          "#EXT-X-VERSION:3",
+          `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Default",DEFAULT=YES,AUTOSELECT=YES,URI="${audioRelayUrl}"`,
+          `#EXT-X-STREAM-INF:BANDWIDTH=8000000,AUDIO="audio"`,
+          videoRelayUrl,
+          "",
+        ].join("\n");
+        sendPlaylist(res, masterManifest);
         return;
       }
 
-      // Other resources not handled by master relay
       res.writeHead(404);
       res.end("Not found");
     });
 
+    server.on("error", (err) => {
+      stopRelay(videoSub.token);
+      stopRelay(audioSub.token);
+      reject(err);
+    });
     server.listen(0, "127.0.0.1", () => {
       const port = server.address().port;
       const masterRelayUrl = `http://127.0.0.1:${port}/${masterToken}/master.m3u8`;
-      activeRelays.set(masterToken, { 
-        server, 
-        videoUrl, 
-        videoHeaders, 
-        audioUrl, 
-        audioHeaders,
-        videoToken,
-        audioToken,
-        videoPort,
-        audioPort,
-        createdAt: Date.now() 
-      });
+      entry.server = server;
+      activeRelays.set(masterToken, entry);
       server.unref();
+      scheduleCleanup();
       resolve({ masterRelayUrl, port, token: masterToken, videoRelayUrl, audioRelayUrl });
     });
-
-    server.on("error", reject);
-    setTimeout(() => cleanupOldRelays(), 60000);
   });
 }
 
