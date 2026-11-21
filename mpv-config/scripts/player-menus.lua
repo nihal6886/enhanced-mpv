@@ -43,14 +43,14 @@ local function set_quality(height)
   if height == "auto" then
     mp.set_property("ytdl-format", "bestvideo+bestaudio/best")
   else
-    mp.set_property("ytdl-format", "bestvideo[height<=" + height + "]+bestaudio/best")
+    mp.set_property("ytdl-format", "bestvideo[height<=" .. height .. "]+bestaudio/best")
   end
   local pos = mp.get_property_number("time-pos") or 0
   local path = mp.get_property("path")
   if path then
-    mp.commandv("loadfile", path, "replace", "start=" + string.format("%.3f", pos))
+    mp.commandv("loadfile", path, "replace", "start=" .. string.format("%.3f", pos))
   end
-  mp.osd_message("Quality: " + (height == "auto" and "Auto" or height + "p"), 1.5)
+  mp.osd_message("Quality: " .. (height == "auto" and "Auto" or height .. "p"), 1.5)
 end
 
 local function get_audio_tracks()
@@ -90,7 +90,7 @@ end
 local function build_menu_ass(title, items, selected)
   local ass = {}
   table.insert(ass, string.format("{\\an7\\fs28\\b1\\bord0\\shad0\\1c&H%s&\\4c&H%s&}%s", NEON_GREEN, DARK_BG, title))
-  table.insert(ass, "{\\fs14\\1c&H" + TEXT_MUTED + "}\\n")
+  table.insert(ass, "{\\fs14\\1c&H" .. TEXT_MUTED .. "}\\n")
 
   for i, item in ipairs(items) do
     local is_selected = (i == selected)
@@ -98,7 +98,7 @@ local function build_menu_ass(title, items, selected)
     local bg_color = is_selected and HOVER_BG or DARK_CARD
     local border = is_selected and NEON_GREEN or BORDER_COLOR
     local text_color = is_active and NEON_GREEN or TEXT_WHITE
-    local checkmark = is_active and " {\\1c&H" + NEON_GREEN + "}\\uE8FB" or ""
+    local checkmark = is_active and " {\\1c&H" .. NEON_GREEN .. "}\\uE8FB" or ""
 
     table.insert(ass, string.format(
       "{\\an7\\fs22\\b0\\bord0\\shad0\\1c&H%s&\\4c&H%s&\\3c&H%s&}  %s%s\\n",
@@ -122,12 +122,12 @@ local function show_menu(menu_type)
     menu_items = get_audio_tracks()
     -- Find currently selected track
     for i, item in ipairs(menu_items) do
-      if item.selected then selected_index = i break end
+      if item.selected then selected_index = i; break end
     end
   elseif menu_type == "subtitles" then
     menu_items = get_subtitle_tracks()
     for i, item in ipairs(menu_items) do
-      if item.selected then selected_index = i break end
+      if item.selected then selected_index = i; break end
     end
   end
 
@@ -162,17 +162,17 @@ local function activate_menu_item()
     set_quality(item.height)
   elseif active_menu == "audio" then
     mp.set_property("aid", item.id)
-    mp.osd_message("Audio: " + item.label, 1.5)
+    mp.osd_message("Audio: " .. item.label, 1.5)
   elseif active_menu == "subtitles" then
     mp.set_property("sid", item.id)
-    mp.osd_message("Subtitles: " + item.label, 1.5)
+    mp.osd_message("Subtitles: " .. item.label, 1.5)
   end
   hide_menu()
 end
 
 local function audio_sync_adjust(ms)
   mp.commandv("add", "audio-delay", string.format("%.3f", ms / 1000))
-  mp.osd_message("Audio sync: " + (ms > 0 and "+" or "") + ms + "ms", 1.5)
+  mp.osd_message("Audio sync: " .. (ms > 0 and "+" or "") .. ms .. "ms", 1.5)
 end
 
 -- Key bindings

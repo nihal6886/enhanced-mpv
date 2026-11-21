@@ -19,7 +19,7 @@ const {
   ytdlSupported,
   joinHeaderFields,
 } = require("./sanitizer");
-const { startRelay, startMasterRelay } = require("./stream-relay");
+const { startRelay } = require("./stream-relay");
 
 const RELAY_URL_RE = /^http:\/\/127\.0\.0\.1:\d+\/[a-f0-9]+\/(?:[a-z]+\/)?(index\.m3u8|master\.m3u8)/i;
 
@@ -299,6 +299,8 @@ function buildArgs(payload, subFiles, _mpvBin) {
 function ipcCandidates() {
   const primary = ipcPath();
   const homeSock = path.join(os.homedir(), ".enhanced-mpv", "mpv-socket");
+  // On Windows, the named pipe \\.\pipe\enhanced-mpv-socket is the primary IPC
+  // endpoint used by mpv-launcher. Check it FIRST before Unix socket paths.
   const extra = process.platform === "win32"
     ? ["\\\\.\\pipe\\enhanced-mpv-socket", "\\\\.\\pipe\\enhanced-mpv", homeSock]
     : [homeSock, "/tmp/enhanced-mpv.sock"];
@@ -452,19 +454,24 @@ let liveIpc = null;
 
 async function ipcAlive() {
   const targets = ipcCandidates();
-  const checks = targets.map(async (target) => {
-    const r = await sendIpc(["get_property", "mpv-version"], target, 300);
-    if (r && (r.error === "success" || r.data)) return { target, r };
-    throw new Error("mpv IPC unavailable");
-  });
-  try {
-    const result = await Promise.any(checks);
-    if (result && result.target) {
-      liveIpc = result.target;
-      return true;
+  // Retry up to 3 times with 50ms delay to handle race where mpv is starting
+  // but IPC socket isn't ready yet.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const checks = targets.map(async (target) => {
+      const r = await sendIpc(["get_property", "mpv-version"], target, 300);
+      if (r && (r.error === "success" || r.data)) return { target, r };
+      throw new Error("mpv IPC unavailable");
+    });
+    try {
+      const result = await Promise.any(checks);
+      if (result && result.target) {
+        liveIpc = result.target;
+        return true;
+      }
+    } catch {
+      // No active mpv IPC endpoint; retry or proceed.
     }
-  } catch {
-    // No active mpv IPC endpoint; spawning can proceed immediately.
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 50));
   }
   liveIpc = null;
   return false;
@@ -616,27 +623,29 @@ function loadfilePlan(args) {
 }
 
 // Replace (or append to) the playlist of a running mpv over IPC:
-//   loadfile <url> <mode> -1 { start, headers, audio, subs, ... }
-// then unpause (keep-open-pause leaves the old file paused at EOF). Every
-// track travels with the playlist entry, so queued items keep theirs too.
-// Rejects when mpv refuses the command (e.g. mpv < 0.38 without the index
-// argument) so the caller can fall back to a clean respawn.
-async function loadFileIpc(url, mode, startTime, target, extra) {
-  const opts = extra || {};
-  const options = { ...(opts.options || {}) };
-  const start = resumeStart(startTime, opts.duration);
-  // Always explicit: an unset start would inherit a CLI --start from the
-  // original spawn or let watch-later resume override the browser position.
-  options.start = start > 0 ? String(start) : "none";
-  const r = await sendIpc(["loadfile", url, mode, -1, options], target, 3000);
-  if (!r || r.error !== "success") {
-    throw new Error("ipc loadfile rejected: " + String(r && r.error));
-  }
-  if (mode !== "append" && mode !== "append-play") {
-    await sendIpc(["set_property", "pause", false], target, 500).catch(() => {});
-  }
-  return true;
-}
+ //   loadfile <url> <mode> -1 { start, headers, audio, subs, ... }
+ // then unpause (keep-open-pause leaves the old file paused at EOF). Every
+ // track travels with the playlist entry, so queued items keep theirs too.
+ // Rejects when mpv refuses the command (e.g. mpv < 0.38 without the index
+ // argument) so the caller can fall back to a clean respawn.
+ async function loadFileIpc(url, mode, startTime, target, extra) {
+   const opts = extra || {};
+   const options = { ...(opts.options || {}) };
+   // Popup/content.js already validate resume positions (>3s, >15s duration, <duration-10s).
+   // Only apply resumeStart filter for context-menu / auto-intercept launches that bypass popup.
+   const start = (opts.startTimeSource && opts.startTimeSource !== "none") ? Math.floor(startTime) : resumeStart(startTime, opts.duration);
+   // Always explicit: an unset start would inherit a CLI --start from the
+   // original spawn or let watch-later resume override the browser position.
+   options.start = start > 0 ? String(start) : "none";
+   const r = await sendIpc(["loadfile", url, mode, -1, options], target, 3000);
+   if (!r || r.error !== "success") {
+     throw new Error("ipc loadfile rejected: " + String(r && r.error));
+   }
+   if (mode !== "append" && mode !== "append-play") {
+     await sendIpc(["set_property", "pause", false], target, 500).catch(() => {});
+   }
+   return true;
+ }
 
 async function replaceViaIpc(payload, args, target, wantQueue) {
   const plan = loadfilePlan(args);
@@ -650,6 +659,7 @@ async function replaceViaIpc(payload, args, target, wantQueue) {
   await sendIpc(["change-list", "sub-files", "clr", ""], target, 500).catch(() => {});
   await loadFileIpc(payload.url, wantQueue ? "append-play" : "replace", payload.startTime, target, {
     duration: payload.duration,
+    startTimeSource: payload.startTimeSource,
     options: plan.options,
   });
   if (wantQueue) return;
@@ -711,53 +721,61 @@ function relayDaemonCommand() {
 }
 
 // Browsers terminate a one-shot native-messaging host right after it replies,
-// which would take an in-process relay (and mpv's stream) down with it. Run
-// the relay in a detached helper that exits on its own once mpv stops using
-// it; fall back to an in-process relay if the helper cannot start.
-function startRelayDaemon(request, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const { bin, args } = relayDaemonCommand();
-    let child;
-    try {
-      child = spawn(bin, args, { detached: true, stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
-    } catch (err) {
-      reject(err);
-      return;
-    }
-    let out = "";
-    let settled = false;
-    const done = (err, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      try { child.stdin.end(); } catch { /* ignore */ }
-      try { child.stdout.destroy(); } catch { /* ignore */ }
-      child.unref();
-      if (err) {
-        try { child.kill(); } catch { /* ignore */ }
-        reject(err);
-      } else {
-        resolve(value);
-      }
-    };
-    const timer = setTimeout(() => done(new Error("relay daemon timeout")), timeoutMs || 5000);
-    child.on("error", (err) => done(err));
-    child.on("exit", () => done(new Error("relay daemon exited")));
-    child.stdout.on("data", (d) => {
-      out += d.toString("utf8");
-      const nl = out.indexOf("\n");
-      if (nl < 0) return;
-      try {
-        const reply = JSON.parse(out.slice(0, nl));
-        if (reply && reply.ok) done(null, reply);
-        else done(new Error((reply && reply.error) || "relay daemon failed"));
-      } catch (err) {
-        done(err);
-      }
-    });
-    child.stdin.write(JSON.stringify(request) + "\n");
-  });
-}
+ // which would take an in-process relay (and mpv's stream) down with it. Run
+ // the relay in a detached helper that exits on its own once mpv stops using
+ // it; fall back to an in-process relay if the helper cannot start.
+ function startRelayDaemon(request, timeoutMs) {
+   return new Promise((resolve, reject) => {
+     const { bin, args } = relayDaemonCommand();
+     let child;
+     try {
+       // On Windows, use stdio: ["pipe", "pipe", "pipe"] so stderr is also captured
+       // and the detached process can survive parent exit. On Unix, "ignore" for stderr is fine.
+       const stdio = process.platform === "win32" ? ["pipe", "pipe", "pipe"] : ["pipe", "pipe", "ignore"];
+       child = spawn(bin, args, { detached: true, stdio, windowsHide: true });
+     } catch (err) {
+       reject(err);
+       return;
+     }
+     let out = "";
+     let settled = false;
+     const done = (err, value) => {
+       if (settled) return;
+       settled = true;
+       clearTimeout(timer);
+       try { child.stdin.end(); } catch { /* ignore */ }
+       try { child.stdout.destroy(); } catch { /* ignore */ }
+       if (process.platform !== "win32") {
+         try { child.stderr.destroy(); } catch { /* ignore */ }
+       }
+       child.unref();
+       if (err) {
+         try { child.kill(); } catch { /* ignore */ }
+         reject(err);
+       } else {
+         resolve(value);
+       }
+     };
+     const timer = setTimeout(() => done(new Error("relay daemon timeout")), timeoutMs || 5000);
+     child.on("error", (err) => done(err));
+     child.on("exit", (code) => {
+       if (!settled) done(new Error("relay daemon exited with code " + code));
+     });
+     child.stdout.on("data", (d) => {
+       out += d.toString("utf8");
+       const nl = out.indexOf("\n");
+       if (nl < 0) return;
+       try {
+         const reply = JSON.parse(out.slice(0, nl));
+         if (reply && reply.ok) done(null, reply);
+         else done(new Error((reply && reply.error) || "relay daemon failed"));
+       } catch (err) {
+         done(err);
+       }
+     });
+     child.stdin.write(JSON.stringify(request) + "\n");
+   });
+ }
 
 async function relaySingle(url, headers) {
   try {
@@ -774,9 +792,8 @@ async function relayMaster(videoUrl, videoHeaders, audioUrl, audioHeaders) {
     const reply = await startRelayDaemon({ kind: "master", videoUrl, videoHeaders, audioUrl, audioHeaders });
     return reply.masterRelayUrl;
   } catch (err) {
-    appendLaunchLog("[" + new Date().toISOString() + "] relay daemon unavailable, using in-process relay: " + String(err.message || err));
-    const r = await startMasterRelay(videoUrl, videoHeaders, audioUrl, audioHeaders);
-    return r.masterRelayUrl;
+    appendLaunchLog("[" + new Date().toISOString() + "] master relay failed: " + String(err.message || err));
+    throw err;
   }
 }
 
@@ -833,7 +850,8 @@ async function play(payload, mode) {
       launchPayload.url = masterRelayUrl;
       launchPayload.isMasterRelay = true;
     } catch (err) {
-      appendLaunchLog("[" + new Date().toISOString() + "] master relay failed, falling back: " + String(err));
+      appendLaunchLog("[" + new Date().toISOString() + "] master relay failed, cannot play protected stream: " + String(err));
+      return { ok: false, error: "Failed to start authenticated relay for split HLS stream", code: "RELAY_FAILED", command: [] };
     }
   } else if (needsAudioRelay) {
     try {

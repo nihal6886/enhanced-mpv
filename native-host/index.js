@@ -267,18 +267,28 @@ function runRelayDaemon() {
       } else {
         out = { ok: true, relayUrl: await relay.startRelay(req.url, req.headers || {}) };
       }
+      // Keep the process alive by ref'ing the server sockets
       for (const entry of relay.activeRelays.values()) {
         if (entry.server) entry.server.ref();
       }
       reply(out);
+      // After replying, we keep the process alive. The parent will close stdin,
+      // but we continue running until all relays are idle.
     } catch (err) {
       reply({ ok: false, error: String((err && err.message) || err) });
       process.exit(1);
     }
   });
+  // On Windows, stdin may not emit 'end' when parent closes pipe. Use a timer
+  // to detect parent disconnect and exit gracefully if no relays are active.
+  let parentAlive = true;
+  process.stdin.on("end", () => { parentAlive = false; });
+  process.stdin.on("close", () => { parentAlive = false; });
   setInterval(() => {
     relay.cleanupOldRelays();
     if (started && relay.activeRelays.size === 0) process.exit(0);
+    // If parent died and no relays, exit
+    if (!parentAlive && relay.activeRelays.size === 0) process.exit(0);
   }, 30000);
 }
 

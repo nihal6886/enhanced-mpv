@@ -97,29 +97,39 @@ const HOOK_REQ = "__empv_media_req";
 const HOOK_RES = "__empv_media_res";
 let hookSeq = 0;
 
-// Synchronous request to the MAIN-world media hook (media-hook.js). DOM events
-// dispatch synchronously, so the reply is available as soon as dispatchEvent
-// returns. Returns null when the hook is absent (e.g. older Firefox).
+// Async request to the MAIN-world media hook (media-hook.js).
+// Returns a Promise that resolves with the reply or null on timeout/absence.
 function hookRequest(op, extra) {
-  const id = "c" + (++hookSeq) + "-" + Date.now();
-  let reply = null;
-  const onRes = (event) => {
+  return new Promise((resolve) => {
+    const id = "c" + (++hookSeq) + "-" + Date.now();
+    let settled = false;
+    const onRes = (event) => {
+      try {
+        const data = JSON.parse(String(event.detail || "{}"));
+        if (data && data.id === id) {
+          settled = true;
+          document.removeEventListener(HOOK_RES, onRes);
+          resolve(data);
+        }
+      } catch {
+        // ignore foreign events
+      }
+    };
+    document.addEventListener(HOOK_RES, onRes);
     try {
-      const data = JSON.parse(String(event.detail || "{}"));
-      if (data && data.id === id) reply = data;
+      document.dispatchEvent(new CustomEvent(HOOK_REQ, { detail: JSON.stringify({ id, op, ...(extra || {}) }) }));
     } catch {
-      // ignore foreign events
+      // ignore
     }
-  };
-  document.addEventListener(HOOK_RES, onRes);
-  try {
-    document.dispatchEvent(new CustomEvent(HOOK_REQ, { detail: JSON.stringify({ id, op, ...(extra || {}) }) }));
-  } catch {
-    // ignore
-  } finally {
-    document.removeEventListener(HOOK_RES, onRes);
-  }
-  return reply;
+    // Timeout fallback: MAIN-world hook may be absent (e.g. older Firefox)
+    setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        document.removeEventListener(HOOK_RES, onRes);
+        resolve(null);
+      }
+    }, 100);
+  });
 }
 
 // Every <video> in the document and in open shadow roots (closed roots are
@@ -154,7 +164,7 @@ function finiteOrZero(n) {
 
 // Merge DOM-visible videos with hook-registered media so closed Shadow DOM
 // players are reported with their true playback position.
-function videoState() {
+async function videoState() {
   const videos = deepVideos().map((el, index) => {
     let src = "";
     try { src = el.currentSrc || el.src || ""; } catch { src = ""; }
@@ -169,7 +179,7 @@ function videoState() {
       area: elementArea(el),
     };
   });
-  const hook = hookRequest("state");
+  const hook = await hookRequest("state");
   const hooked = (hook && Array.isArray(hook.media) ? hook.media : []).filter((m) => m.isVideo !== false);
   for (const m of hooked) {
     const dup = videos.find((v) => v.hookId == null && v.src === m.src &&
@@ -193,8 +203,8 @@ function videoState() {
   return videos;
 }
 
-function pauseAllMedia() {
-  hookRequest("pause");
+async function pauseAllMedia() {
+  await hookRequest("pause");
   for (const v of deepVideos()) {
     try { v.pause(); } catch { /* ignore */ }
   }
@@ -219,8 +229,8 @@ function bestVideo(videos) {
   return ranked[0] || null;
 }
 
-function collect() {
-  const videos = videoState().map((v) => {
+async function collect() {
+  const videos = (await videoState()).map((v) => {
     // Skip hidden videos, ads, invalid/zero duration, or already-ended videos
     if (!(v.area > 0)) return null;
     if (v.ended || !(v.duration > 0)) return null;
@@ -260,9 +270,9 @@ function collect() {
   };
 }
 
-function post() {
+async function post() {
   try {
-    chrome.runtime.sendMessage(collect());
+    chrome.runtime.sendMessage(await collect());
   } catch {
     // extension reloaded
   }
@@ -273,18 +283,18 @@ const obs = new MutationObserver(() => post());
 obs.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "srclang"] });
 setInterval(post, 4000);
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener(async (msg, _sender, sendResponse) => {
   if (msg.type === "pauseVideos") {
-    pauseAllMedia();
-    sendResponse({ ok: true });
-    return;
+    pauseAllMedia().then(() => sendResponse({ ok: true }));
+    return true;
   }
   if (msg.type === "getVideoState") {
-    sendResponse({ videos: videoState().filter((v) => v.src || v.hookId != null) });
-    return;
+    videoState().then(videos => sendResponse({ videos: videos.filter((v) => v.src || v.hookId != null) }));
+    return true;
   }
   if (msg.type === "scan") {
-    sendResponse(collect());
+    sendResponse(await collect());
+    return true;
   }
 });
 
@@ -296,10 +306,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     const list = cfg.autoInterceptDomains || [];
     const match = list.length === 0 || list.some((d) => host === d || host.endsWith("." + d));
     if (!match) return;
-    const data = collect();
+    const data = await collect();
     const url = (data.videos[0] && data.videos[0].src) || location.href;
-    const best = bestVideo(videoState());
-    pauseAllMedia();
+    const best = bestVideo(await videoState());
+    await pauseAllMedia();
     const handoff = { type: "pauseAndHandoff", url };
     if (best && isResumable(best)) {
       handoff.startTime = best.currentTime;

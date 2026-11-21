@@ -865,7 +865,7 @@ begin
           Log('Stamping Enhanced MPV icon into ' + EnhancedMpvExe + '...');
           ResultCode := '';
           Exec(ExpandConstant('{cmd}'), '/c "' + RceditCache + '" "' + EnhancedMpvExe + '" --set-icon "' + IconPath + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-          if ResultCode = '0' then
+          if (ResultCode = '0') and FileExists(EnhancedMpvExe) then
             Log('Icon stamped successfully.')
           else
             Log('rcedit failed (exit code ' + ResultCode + '); icon may not be applied.');
@@ -1009,7 +1009,7 @@ begin
       (either already deployed to the user mpv dir, or bundled offline in
       {app}\mpv from the staging payload). }
     WantModernZLua := not ((FileExists(ExpandConstant('{userappdata}\mpv\scripts\modernz.lua')) and FileExists(ExpandConstant('{userappdata}\mpv\fonts\modernz-icons.ttf'))) or (FileExists(ExpandConstant('{app}\mpv\scripts\modernz.lua')) and FileExists(ExpandConstant('{app}\mpv\fonts\modernz-icons.ttf'))));
-    WantModernZFont := WantModernZLua;
+    WantModernZFont := not ((FileExists(ExpandConstant('{userappdata}\mpv\fonts\modernz-icons.ttf'))) or (FileExists(ExpandConstant('{app}\mpv\fonts\modernz-icons.ttf'))));
 
     ProgressPage.SetProgress(50, 100);
     ProgressPage.SetText('Fetching missing pieces', '');

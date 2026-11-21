@@ -54,6 +54,27 @@
     return nativePlay.apply(this, args);
   };
 
+  const nativeLoad = proto.load;
+  proto.load = function load() {
+    register(this);
+    return nativeLoad.apply(this, arguments);
+  };
+
+  const nativeSrcDescriptor = Object.getOwnPropertyDescriptor(proto, "src") ||
+    Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "src");
+  if (nativeSrcDescriptor && nativeSrcDescriptor.set) {
+    const nativeSrcSet = nativeSrcDescriptor.set;
+    Object.defineProperty(proto, "src", {
+      set(value) {
+        register(this);
+        nativeSrcSet.call(this, value);
+      },
+      get: nativeSrcDescriptor.get,
+      configurable: true,
+      enumerable: true,
+    });
+  }
+
   // Media events are not composed, so they never leave a (closed) shadow
   // root. Listen inside every shadow root as it is created.
   const nativeAttachShadow = Element.prototype.attachShadow;

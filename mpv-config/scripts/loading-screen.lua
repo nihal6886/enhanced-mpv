@@ -176,6 +176,15 @@ mp.register_event("playback-restart", function()
   hide_loading()
 end)
 
+-- Clear buffering step as soon as video output parameters are available
+-- (first frame decoded), which happens before playback-restart in some cases.
+mp.observe_property("video-out-params", "native", function(_, params)
+  if not loading_active then return end
+  if params then
+    update_step("buffering", false)
+  end
+end)
+
 mp.register_event("end-file", function(event)
   -- Only real failures show the error card; "stop" (loadfile replace),
   -- "redirect" (yt-dlp playlists), "eof", and "quit" are normal transitions.

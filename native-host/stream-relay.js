@@ -197,7 +197,8 @@ function rewriteManifestUrls(text, base, manifestBaseUrl) {
 
   // Rewrite quoted URI="..." attributes inside #EXT-X-MEDIA (audio/subtitle
   // renditions), #EXT-X-KEY (AES-128 decryption keys), #EXT-X-MAP (fMP4 init
-  // segments), and I-frame playlists so every rendition/key/init segment
+  // segments), #EXT-X-I-FRAME-STREAM-INF (iframe playlists), and
+  // #EXT-X-SESSION-KEY (session keys) so every rendition/key/init segment/iframe
   // resolves against the playlist base URL and carries the tab's session
   // headers. Non-HTTP key schemes (skd:, data:) and already-relayed URIs are
   // left untouched.

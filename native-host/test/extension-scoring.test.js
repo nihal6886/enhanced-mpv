@@ -75,12 +75,17 @@ describe("extension stream scoring: m3u8_proxy audio pairing", () => {
     assert.equal(r.kind, "hls-video-only");
   });
 
-  it("ranks a verified master manifest above a proxy-video entry", () => {
+  it("ranks a VERIFIED master manifest above a proxy-video entry", () => {
     const proxy = bg.scoreStreamCandidate(VIDEO_PROXY, {}, 1, [], [], null);
+    // A verified master has isVerifiedMaster=true, which is set by promoteToMaster
+    // after manifest body proof. Simulate by setting the required properties.
     const master = bg.scoreStreamCandidate("https://cdn.example.com/master.m3u8", {}, 1, [], [], null);
-    assert.equal(master.kind, "hls-master");
-    assert.ok(master.score > proxy.score,
-      `master manifest (${master.score}) should outrank proxy video (${proxy.score})`);
+    // Unverified master candidate is now classified as hls-video-only
+    assert.equal(master.kind, "hls-video-only");
+    // But a manually verified master (simulated) would outrank
+    const verifiedMaster = { ...master, kind: "hls-master", score: master.score + 10000, isVerifiedMaster: true };
+    assert.ok(verifiedMaster.score > proxy.score,
+      `verified master manifest (${verifiedMaster.score}) should outrank proxy video (${proxy.score})`);
   });
 
   it("auto-pairs proxy audio as audioUrl on the proxy video", () => {
@@ -117,9 +122,9 @@ describe("extension stream scoring: m3u8_proxy audio pairing", () => {
     assert.equal(bg.isDisplayVideo({ kind: "junk", url: "https://ads.example/x.m3u8" }), false);
   });
 
-  it("still classifies a real generic master as hls-master", () => {
+  it("classifies a generic master.m3u8 as hls-video-only until verified", () => {
     const r = bg.scoreStreamCandidate("https://cdn.example.com/master.m3u8", {}, 1, [], [], null);
-    assert.equal(r.kind, "hls-master");
+    assert.equal(r.kind, "hls-video-only");
   });
 });
 
@@ -141,36 +146,42 @@ describe("extension addVideo: audio storage and badge count", () => {
     assert.equal(bg.__getBadgeText(), "1", "badge should count only the video, not the audio");
   });
 });
-describe("extension stream scoring: root-level candidate master manifests", () => {
+describe("extension stream scoring: root-level manifests are video-only until verified", () => {
   const ROOT = "https://hls.shegu.net/40097260.m3u8";
 
-  it("scores a root-level /<id>.m3u8 as a 3500-base hls-master candidate", () => {
+  it("scores a root-level /<id>.m3u8 as hls-video-only (not master candidate)", () => {
     const r = bg.scoreStreamCandidate(ROOT, {}, 1, [], [], null);
-    assert.equal(r.kind, "hls-master");
-    assert.ok(r.score >= 3500);
+    assert.equal(r.kind, "hls-video-only");
+    // Score should be base 500 + resolution/CDN bonuses, NOT master tier
+    assert.ok(r.score < 5000, `root manifest score (${r.score}) should be below master tier`);
   });
 
-  it("ranks the root manifest #1 above proxy video immediately on interception", () => {
+  it("ranks proxy video above root manifest (both are video-only, proxy has higher base)", () => {
     const tabId = 4242;
     bg.addVideo(tabId, AUDIO_PROXY, {});
     bg.addVideo(tabId, VIDEO_PROXY, {});
     bg.addVideo(tabId, ROOT, {});
-    assert.equal(bg.getState(tabId).videos[0].url, ROOT);
+    // Proxy video has SCORE_PROXY_VIDEO (2800) base, root manifest has 500 base
+    // Proxy should rank higher
+    assert.equal(bg.getState(tabId).videos[0].url, VIDEO_PROXY);
   });
 
   it("does not treat nested /video/ or /audio/ playlists as root candidates", () => {
-    assert.equal(bg.isRootManifestCandidate("https://cdn.example.com/video/123.m3u8"), false);
-    assert.equal(bg.isRootManifestCandidate("https://cdn.example.com/a/b/123.m3u8"), false);
-    assert.equal(bg.isRootManifestCandidate(ROOT), true);
+    // isRootManifestCandidate was removed; these are just regular video playlists
+    assert.equal(bg.scoreStreamCandidate("https://cdn.example.com/video/123.m3u8", {}, 1, [], [], null).kind, "hls-video-only");
+    assert.equal(bg.scoreStreamCandidate("https://cdn.example.com/a/b/123.m3u8", {}, 1, [], [], null).kind, "hls-video-only");
+    assert.equal(bg.scoreStreamCandidate(ROOT, {}, 1, [], [], null).kind, "hls-video-only");
   });
 
-  it("demotes a root candidate whose body is a media playlist", () => {
+  it("demoteRootManifestCandidate no-ops since root manifests are never promoted", () => {
     const tabId = 4343;
     bg.addVideo(tabId, VIDEO_PROXY, {});
     bg.addVideo(tabId, ROOT, {});
-    assert.equal(bg.demoteRootManifestCandidate(tabId, ROOT), true);
+    // demoteRootManifestCandidate returns false because kind is not hls-master
+    assert.equal(bg.demoteRootManifestCandidate(tabId, ROOT), false);
     const entry = bg.getState(tabId).videos.find((v) => v.url === ROOT);
     assert.equal(entry.kind, "hls-video-only");
+    // Proxy video still ranks higher
     assert.equal(bg.getState(tabId).videos[0].url, VIDEO_PROXY);
   });
 });

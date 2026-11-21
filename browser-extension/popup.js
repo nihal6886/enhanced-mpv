@@ -193,7 +193,7 @@ async function pauseBrowserVideos(tabId) {
 // hook) with currentTime/duration/area/readyState so the popup can recover the
 // playback position from iframe and Shadow DOM players. Must stay
 // self-contained: executeScript serializes only this function.
-function collectPlaybackFrame() {
+async function collectPlaybackFrame() {
   const finite = (n) => { const v = Number(n); return Number.isFinite(v) ? v : 0; };
   const deep = (root, out) => {
     try {
@@ -226,13 +226,18 @@ function collectPlaybackFrame() {
   }
   try {
     const id = "p" + Date.now() + Math.random();
-    let reply = null;
-    const onRes = (e) => {
-      try { const d = JSON.parse(String(e.detail || "{}")); if (d.id === id) reply = d; } catch { /* ignore */ }
-    };
-    document.addEventListener("__empv_media_res", onRes);
-    document.dispatchEvent(new CustomEvent("__empv_media_req", { detail: JSON.stringify({ id, op: "state" }) }));
-    document.removeEventListener("__empv_media_res", onRes);
+    const reply = await new Promise((resolve) => {
+      const onRes = (e) => {
+        try { const d = JSON.parse(String(e.detail || "{}")); if (d.id === id) resolve(d); } catch { /* ignore */ }
+      };
+      document.addEventListener("__empv_media_res", onRes);
+      document.dispatchEvent(new CustomEvent("__empv_media_req", { detail: JSON.stringify({ id, op: "state" }) }));
+      // Timeout fallback
+      setTimeout(() => {
+        document.removeEventListener("__empv_media_res", onRes);
+        resolve(null);
+      }, 100);
+    });
     for (const m of (reply && reply.media) || []) {
       if (m.isVideo === false) continue;
       const dup = videos.find((v) => v.hookId == null && v.src === m.src && Math.abs(v.currentTime - m.currentTime) < 1);
@@ -259,20 +264,24 @@ function collectPlaybackFrame() {
 
 // Injected into a single frame: pause the exact media element the popup
 // selected (through the MAIN-world hook for closed Shadow DOM players).
-function pausePlaybackFrame(target) {
+async function pausePlaybackFrame(target) {
   let done = false;
   if (target.hookId != null) {
     try {
       const id = "p" + Date.now() + Math.random();
-      let reply = null;
-      const onRes = (e) => {
-        try { const d = JSON.parse(String(e.detail || "{}")); if (d.id === id) reply = d; } catch { /* ignore */ }
-      };
-      document.addEventListener("__empv_media_res", onRes);
-      document.dispatchEvent(new CustomEvent("__empv_media_req", {
-        detail: JSON.stringify({ id, op: "pause", hookId: target.hookId }),
-      }));
-      document.removeEventListener("__empv_media_res", onRes);
+      const reply = await new Promise((resolve) => {
+        const onRes = (e) => {
+          try { const d = JSON.parse(String(e.detail || "{}")); if (d.id === id) resolve(d); } catch { /* ignore */ }
+        };
+        document.addEventListener("__empv_media_res", onRes);
+        document.dispatchEvent(new CustomEvent("__empv_media_req", {
+          detail: JSON.stringify({ id, op: "pause", hookId: target.hookId }),
+        }));
+        setTimeout(() => {
+          document.removeEventListener("__empv_media_res", onRes);
+          resolve(null);
+        }, 100);
+      });
       done = Boolean(reply && reply.paused > 0);
     } catch {
       // media hook unavailable

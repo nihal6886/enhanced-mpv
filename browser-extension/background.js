@@ -8,7 +8,6 @@ const CHUNK_RE = /\.(ts|m4s|cmfv|cmfa)(?:$|[?#])/i;
 const AD_RE = /(doubleclick|googlesyndication|adservice|adsystem|pagead|prebid|ads\d*\.|\/ads\/|analytics|tracking|pixel)/i;
 const PIXEL_RE = /(1x1|pixel|spacer|transparent\.gif)/i;
 const SEGMENT_HOST_RE = /(googlevideo\.com|\.m4s$|\.ts$)/i;
-const MASTER_MANIFEST_RE = /master\.m3u8|index\.m3u8/i;
 // Audio path segments: /audio/, /audio_ (e.g. audio_1080), /audio-, /audio. plus
 // codec/query hints. Checked BEFORE master so ".../audio/.../index.m3u8" is audio.
 const AUDIO_PLAYLIST_RE = /(?:^|\/)audio(?:[_\-.]|\/|$)|audio_only|audio-only|mp4a|aac|channels=|type=audio/i;
@@ -179,23 +178,8 @@ function parseManifestInfo(text, baseUrl) {
   };
 }
 
-function isMasterManifestUrl(url) {
-  return MASTER_MANIFEST_RE.test(url.toLowerCase());
-}
-
 function isAudioPlaylistUrl(url) {
   return AUDIO_PLAYLIST_RE.test(url.toLowerCase());
-}
-
-// Root-level ".../<id>.m3u8" (e.g. hls.shegu.net/40097260.m3u8) with no
-// /video/ or /audio/ path segment: treat as a candidate master manifest until
-// its body proves it is a media playlist.
-function isRootManifestCandidate(url) {
-  let pathname;
-  try { pathname = new URL(url).pathname; } catch { return false; }
-  if (!/\.m3u8$/i.test(pathname)) return false;
-  if (/\/(?:video|audio)\//i.test(pathname)) return false;
-  return pathname.split("/").filter(Boolean).length === 1;
 }
 
 const audioProbeDone = new Set();
@@ -211,7 +195,7 @@ function isVideoOnlyVideo(v) {
   const info = v.manifestInfo || {};
   if (info.isMaster) return false;
   if (info.hasAudio) return false;
-  return true;
+  return v.kind === "hls-video-only" || PROXY_VIDEO_RE.test(v.url);
 }
 
 // Register a captured audio playlist/segment so it can be paired with video.
@@ -569,26 +553,6 @@ function scoreStreamCandidate(url, headers, tabId, allVideos = [], audioStreams 
   if (PROXY_VIDEO_RE.test(u)) {
     const r = scoreVideoOnly(url, u, frameId, allVideos, audioStreams, SCORE_PROXY_VIDEO);
     return { score: r.score, kind: r.kind, audioUrl: r.audioUrl, manifestInfo: null, frameId: frameId };
-  }
-
-  // STRICT MASTER-MANIFEST PRIORITY: the master tier base is above the
-  // highest possible proxy-video score (base + resolution + CDN + bandwidth +
-  // audio pairing), so a sub-playlist never outranks its master.
-  if (isMasterManifestUrl(u) || isRootManifestCandidate(url)) {
-    kind = "hls-master";
-    score += SCORE_HLS_MASTER;
-
-    if (/(2160|4k|uhd)/i.test(u)) score += 400;
-    else if (/(1440|2k|qhd)/i.test(u)) score += 300;
-    else if (/(1080|fhd)/i.test(u)) score += 300;
-    else if (/(720|hd)/i.test(u)) score += 200;
-
-    if (!/(proxy|relay|googlevideo|manifest\.googlevideo)/i.test(u)) score += 100;
-
-    const bw = /bandwidth[=_](\d+)/i.exec(url);
-    if (bw) score += Math.min(Number(bw[1]) / 1e6, 500);
-
-    return { score, kind, audioUrl: null, manifestInfo: null, frameId: frameId };
   }
 
   // Video-Only Sub-Playlists - need pairing
@@ -1164,7 +1128,9 @@ async function buildPayload(tab, url, extra) {
   const hasExtraStart = extra && extra.startTime != null && Number.isFinite(Number(extra.startTime));
   const rawStart = hasExtraStart ? Number(extra.startTime) : Number(selectedVideo?.currentTime);
   const rawDuration = hasExtraStart ? Number(extra.duration) : Number(selectedVideo?.duration);
-  const startTime = resumeStartTime(rawStart, rawDuration);
+  // Popup (and content.js) already validate resume positions (>3s, >15s duration, <duration-10s).
+  // Only apply resumeStartTime filter for context-menu / auto-intercept launches that bypass popup.
+  const startTime = hasExtraStart ? Math.floor(rawStart) : resumeStartTime(rawStart, rawDuration);
   const duration = Number.isFinite(rawDuration) ? rawDuration : 0;
   
   // Include manifestInfo for verified master manifests
@@ -1190,16 +1156,28 @@ async function buildPayload(tab, url, extra) {
     audioUrl = null;
   } else if (!audioUrl) {
     // Prefer audioStreams (explicitly captured audio playlists), then fallback to hls-audio-only from videos
+    // Match by same frameId as the video first (like scoreVideoOnly does), then tab-wide best.
+    const videoFrameId = selectedVideo?.frameId || null;
     const audioPool = [
       ...(state.audioStreams || []),
       ...(state.videos || []).filter(v => v.kind === "hls-audio-only" || isAudioPlaylistUrl(v.url))
-    ].sort((a, b) => (b.score || 0) - (a.score || 0));
+    ];
+    const sameFrameAudio = audioPool
+      .filter(a => videoFrameId && a.frameId && a.frameId === videoFrameId)
+      .sort((a, b) => (b.score || 0) - (a.score || 0));
+    const otherAudio = audioPool
+      .filter(a => !(videoFrameId && a.frameId && a.frameId === videoFrameId))
+      .sort((a, b) => (b.score || 0) - (a.score || 0));
+    const orderedAudio = [...sameFrameAudio, ...otherAudio];
     
-    if (audioPool.length > 0) {
-      const bestAudio = audioPool[0];
+    if (orderedAudio.length > 0) {
+      const bestAudio = orderedAudio[0];
       audioUrl = bestAudio.url;
+      // Inherit headers from the audio track, falling back to video headers for Cookie/Referer/Origin/UA
       if (bestAudio.headers) {
         audioHeaders = { ...bestAudio.headers };
+      } else if (selectedVideo?.headers) {
+        audioHeaders = { ...selectedVideo.headers };
       }
     }
   } else if (audioUrl) {
@@ -1207,6 +1185,8 @@ async function buildPayload(tab, url, extra) {
       || (state.audioStreams || []).find(v => v.url.split("?")[0] === audioUrl.split("?")[0]);
     if (audioVideo?.headers) {
       audioHeaders = { ...audioVideo.headers };
+    } else if (selectedVideo?.headers) {
+      audioHeaders = { ...selectedVideo.headers };
     }
   }
 

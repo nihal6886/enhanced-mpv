@@ -37,6 +37,10 @@ $ModernZFontUrl = "https://github.com/Samillion/ModernZ/releases/latest/download
 $ThumbfastUrl = "https://github.com/po5/thumbfast/archive/refs/heads/master.zip"
 $SubSelectUrl = "https://github.com/CogentRedTester/mpv-sub-select/archive/refs/heads/master.zip"
 
+# Local paths to vendor ModernZ assets from (if already installed)
+$LocalModernZLua = Join-Path $env:APPDATA "mpv\scripts\modernz.lua"
+$LocalModernZFont = Join-Path $env:APPDATA "mpv\fonts\modernz-icons.ttf"
+
 function Write-Step($Message) { Write-Host "==> $Message" -ForegroundColor Cyan }
 function Ensure-Dir($Path) { New-Item -ItemType Directory -Force -Path $Path | Out-Null }
 function Reset-Dir($Path) { if (Test-Path $Path) { Remove-Item $Path -Recurse -Force }; Ensure-Dir $Path }
@@ -149,13 +153,27 @@ if (-not $SkipLua) {
   $tmp = Join-Path $env:TEMP ("empv-build-" + [guid]::NewGuid().ToString("N"))
   Ensure-Dir $tmp
   try {
-    # ModernZ assets are version-tracked upstream as individual release files.
+    # ModernZ assets: prefer local copies from %APPDATA%\mpv (installed by setup.ps1),
+    # fall back to GitHub release download. This avoids CI rate limits and ensures
+    # the exact same version the user has installed gets bundled.
     $modernZFonts = Join-Path $MpvStage "fonts"
     Ensure-Dir $modernZFonts
-    if (-not (Download-File $ModernZLuaUrl (Join-Path $MpvScripts "modernz.lua"))) {
+    
+    # modernz.lua
+    $modernZLuaDest = Join-Path $MpvScripts "modernz.lua"
+    if (Test-Path $LocalModernZLua) {
+      Write-Step "Vendoring ModernZ Lua from local install"
+      Copy-Item $LocalModernZLua $modernZLuaDest -Force
+    } elseif (-not (Download-File $ModernZLuaUrl $modernZLuaDest)) {
       throw "Could not download the latest ModernZ Lua release."
     }
-    if (-not (Download-File $ModernZFontUrl (Join-Path $modernZFonts "modernz-icons.ttf"))) {
+    
+    # modernz-icons.ttf
+    $modernZFontDest = Join-Path $modernZFonts "modernz-icons.ttf"
+    if (Test-Path $LocalModernZFont) {
+      Write-Step "Vendoring ModernZ font from local install"
+      Copy-Item $LocalModernZFont $modernZFontDest -Force
+    } elseif (-not (Download-File $ModernZFontUrl $modernZFontDest)) {
       throw "Could not download the ModernZ icon font."
     }
 
