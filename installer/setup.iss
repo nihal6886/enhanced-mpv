@@ -20,7 +20,7 @@
 #define GeckoId "enhanced-mpv@enhanced-mpv.local"
 
 [Setup]
-ArchiveExtraction=enhanced
+ArchiveExtraction=full
 AppId={{7E4C1A92-6B3D-4F58-9E21-C0A4D5F6B781}
 AppName=Enhanced MPV
 AppVersion={#AppVersion}
@@ -46,7 +46,7 @@ UninstallDisplayIcon={app}\host\enhanced-mpv-host.exe
 CloseApplications=no
 RestartApplications=no
 SetupLogging=yes
-; ArchiveExtraction=enhanced (top of [Setup]) uses the full 7-Zip extractor
+; ArchiveExtraction=full (top of [Setup]) uses the full 7-Zip extractor
 ; for the BCJ2/LZMA2 .7z mpv builds we download (Inno Setup 6.5+, tested 6.7).
 DisableWelcomePage=no
 
