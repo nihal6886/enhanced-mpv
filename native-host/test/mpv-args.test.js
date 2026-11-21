@@ -220,7 +220,17 @@ describe("resume bounds and single-instance IPC replacement", () => {
     assert.equal(plan.options.ytdl, "no");
     assert.ok(plan.options["http-header-fields"].includes("Referer: https://site.example.test/"));
     assert.deepEqual(plan.audioFiles, ["https://cdn.example.test/audio/index.m3u8"]);
+    assert.equal(plan.options["audio-files-append"], "https://cdn.example.test/audio/index.m3u8");
+    assert.equal(plan.options["resume-playback"], "no");
     assert.equal(plan.lavfAppend, "allowed_extensions=ALL");
     assert.equal(plan.options["input-ipc-server"], undefined);
+  });
+
+  it("resets spawn-time options for a reused window (yt-dlp after a direct stream)", () => {
+    const plan = loadfilePlan(buildArgs({ url: "https://www.youtube.com/watch?v=abc" }, [], "mpv"));
+    assert.equal(plan.options.ytdl, "yes");
+    assert.equal(plan.options["http-header-fields"], "");
+    assert.equal(plan.options["audio-files-append"], undefined);
+    assert.equal(plan.options.sid, "auto");
   });
 });

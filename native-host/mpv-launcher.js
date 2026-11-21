@@ -285,6 +285,9 @@ function buildArgs(payload, subFiles, _mpvBin) {
     if (isSafeLocalPath(f)) args.push("--sub-file=" + f);
   }
   if (subFiles.length > 0) args.push("--sid=1");
+  // The browser position is authoritative: never let watch-later resume
+  // (save-position-on-quit) override it.
+  args.push("--resume-playback=no");
   const start = resumeStart(payload.startTime, payload.duration);
   if (start > 0) args.push("--start=+" + String(start));
   // Keep the media URL last so mpv parses it as the input, not as an option value.
@@ -566,9 +569,11 @@ function spawnMpv(mpvBin, args, spawnStartMs) {
   return child;
 }
 
-// Per-file options that are safe to pass through `loadfile ... <options>` so a
-// reused window plays the new stream with its own headers, title, and yt-dlp
-// settings (they reset automatically when the file ends).
+// Per-file options passed through `loadfile ... <options>` so a reused window
+// plays the new stream with its own headers, title, yt-dlp settings, paired
+// audio, and subtitles. mpv restores them when the file ends, and the
+// defaults below override anything the window was originally spawned with
+// (e.g. --ytdl=no or --audio-file from a previous direct-stream launch).
 const PER_FILE_OPTIONS = new Set([
   "http-header-fields",
   "force-media-title",
@@ -576,14 +581,22 @@ const PER_FILE_OPTIONS = new Set([
   "ytdl-format",
   "ytdl-raw-options",
   "sub-auto",
+  "sid",
+  "resume-playback",
 ]);
 
 function loadfilePlan(args) {
-  const options = {};
-  const audioFiles = [];
-  const subFiles = [];
+  const options = {
+    ytdl: "yes",
+    "http-header-fields": "",
+    "force-media-title": "",
+    sid: "auto",
+    "resume-playback": "no",
+  };
   let profile = null;
   let lavfAppend = null;
+  const audioFiles = [];
+  const subFiles = [];
   for (const a of args.slice(0, -1)) {
     const m = /^--([a-z0-9-]+)=(.*)$/is.exec(a);
     if (!m) continue;
@@ -594,81 +607,34 @@ function loadfilePlan(args) {
     else if (key === "profile") profile = value;
     else if (key === "demuxer-lavf-o-append") lavfAppend = value;
   }
+  // -append takes one item verbatim, so URLs containing ':' survive (the
+  // plain list options split on the platform path separator).
+  if (audioFiles.length) options["audio-files-append"] = audioFiles[0];
+  if (subFiles.length) options["sub-files-append"] = subFiles[0];
   return { options, audioFiles, subFiles, profile, lavfAppend };
 }
 
 // Replace (or append to) the playlist of a running mpv over IPC:
-//   loadfile <url> <mode> -1 { start, headers, ... }
-// then unpause (keep-open-pause leaves the old file paused at EOF), and, once
-// the new file is loaded, hot-attach the paired audio and local subtitles.
+//   loadfile <url> <mode> -1 { start, headers, audio, subs, ... }
+// then unpause (keep-open-pause leaves the old file paused at EOF). Every
+// track travels with the playlist entry, so queued items keep theirs too.
 // Rejects when mpv refuses the command (e.g. mpv < 0.38 without the index
 // argument) so the caller can fall back to a clean respawn.
-function loadFileIpc(url, mode, startTime, target, extra) {
+async function loadFileIpc(url, mode, startTime, target, extra) {
   const opts = extra || {};
   const options = { ...(opts.options || {}) };
   const start = resumeStart(startTime, opts.duration);
-  if (start > 0) options.start = String(start);
-  const followUps = [
-    ...(opts.audioFiles || []).map((f) => ["audio-add", f, "select"]),
-    ...(opts.subFiles || []).map((f) => ["sub-add", f, "select"]),
-  ];
-  const replacing = mode !== "append" && mode !== "append-play";
-  return new Promise((resolve, reject) => {
-    const sock = connectIpc(target);
-    let input = "";
-    let acked = false;
-    let finished = false;
-    let nextId = 10;
-    const finish = (err) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      sock.end();
-      if (err && !acked) reject(err);
-      else resolve(true);
-    };
-    const send = (command) => {
-      try { sock.write(JSON.stringify({ command, request_id: nextId++ }) + "\n"); } catch { /* closed */ }
-    };
-    // Wait for file-loaded only when there is follow-up work; cap the wait so
-    // the native host can still answer the browser promptly.
-    let timer = setTimeout(() => finish(new Error("ipc loadfile timeout")), 3000);
-    sock.on("connect", () => {
-      sock.write(JSON.stringify({ command: ["loadfile", url, mode, -1, options], request_id: 1 }) + "\n");
-    });
-    sock.on("data", (chunk) => {
-      input += chunk.toString("utf8");
-      const lines = input.split("\n");
-      input = lines.pop() || "";
-      for (const line of lines) {
-        let message;
-        try { message = JSON.parse(line); } catch { continue; }
-        if (message.request_id === 1) {
-          if (message.error !== "success") {
-            finish(new Error("ipc loadfile rejected: " + String(message.error)));
-            return;
-          }
-          acked = true;
-          if (replacing) send(["set_property", "pause", false]);
-          if (!followUps.length) {
-            finish();
-            return;
-          }
-          clearTimeout(timer);
-          timer = setTimeout(() => {
-            appendLaunchLog("[" + new Date().toISOString() + "] IPC file-loaded wait timed out; follow-ups skipped");
-            finish();
-          }, 8000);
-        } else if (acked && message.event === "file-loaded") {
-          for (const cmd of followUps) send(cmd);
-          if (replacing) send(["set_property", "pause", false]);
-          // Give mpv a moment to read the queued commands before closing.
-          setTimeout(() => finish(), 150);
-        }
-      }
-    });
-    sock.on("error", (err) => finish(err));
-  });
+  // Always explicit: an unset start would inherit a CLI --start from the
+  // original spawn or let watch-later resume override the browser position.
+  options.start = start > 0 ? String(start) : "none";
+  const r = await sendIpc(["loadfile", url, mode, -1, options], target, 3000);
+  if (!r || r.error !== "success") {
+    throw new Error("ipc loadfile rejected: " + String(r && r.error));
+  }
+  if (mode !== "append" && mode !== "append-play") {
+    await sendIpc(["set_property", "pause", false], target, 500).catch(() => {});
+  }
+  return true;
 }
 
 async function replaceViaIpc(payload, args, target, wantQueue) {
@@ -677,11 +643,13 @@ async function replaceViaIpc(payload, args, target, wantQueue) {
   if (plan.lavfAppend) {
     await sendIpc(["change-list", "demuxer-lavf-o", "append", plan.lavfAppend], target, 500).catch(() => {});
   }
+  // Drop external tracks a CLI spawn added globally so they never attach to
+  // the next video (loaded tracks of the current file are unaffected).
+  await sendIpc(["change-list", "audio-files", "clr", ""], target, 500).catch(() => {});
+  await sendIpc(["change-list", "sub-files", "clr", ""], target, 500).catch(() => {});
   await loadFileIpc(payload.url, wantQueue ? "append-play" : "replace", payload.startTime, target, {
     duration: payload.duration,
     options: plan.options,
-    audioFiles: plan.audioFiles,
-    subFiles: plan.subFiles,
   });
   if (wantQueue) return;
   await Promise.allSettled([
@@ -690,6 +658,18 @@ async function replaceViaIpc(payload, args, target, wantQueue) {
     sendIpc(["set_property", "pause", false], target, 300),
     sendScriptMessage("bring-to-front", target),
   ]);
+  // Portable raise for X11/Wayland/macOS (window-icon.lua only raises on
+  // Windows): a brief ontop toggle makes the window manager restack it.
+  try {
+    const ontop = await sendIpc(["get_property", "ontop"], target, 300);
+    if (ontop && ontop.error === "success" && ontop.data === false) {
+      await sendIpc(["set_property", "ontop", true], target, 300);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await sendIpc(["set_property", "ontop", false], target, 300);
+    }
+  } catch {
+    // best effort
+  }
 }
 
 // Wait until mpv has a file loaded (optionally a specific path) before
