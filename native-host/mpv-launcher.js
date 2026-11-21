@@ -284,7 +284,8 @@ function buildArgs(payload, subFiles, _mpvBin) {
   for (const f of subFiles) {
     if (isSafeLocalPath(f)) args.push("--sub-file=" + f);
   }
-  if (subFiles.length > 0) args.push("--sid=1");
+  // No --sid: track IDs number embedded tracks first, so a fixed ID would pick
+  // an embedded subtitle; mpv's auto-selection prefers external sub files.
   // The browser position is authoritative: never let watch-later resume
   // (save-position-on-quit) override it.
   args.push("--resume-playback=no");
