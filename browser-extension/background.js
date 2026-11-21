@@ -1108,7 +1108,7 @@ async function buildPayload(tab, url, extra) {
       cookies = "";
     }
   }
-  const selected = url || (state.videos[0] && state.videos[0].url) || pageUrl;
+  const selected = extra?.forcePageUrl === true ? pageUrl : (url || (state.videos[0] && state.videos[0].url) || pageUrl);
   const cfg = (await chrome.storage.sync.get("extension")).extension || {};
   let selectedVideo = state.videos.find(v => v.url.split("?")[0] === selected.split("?")[0]);
 

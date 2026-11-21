@@ -298,6 +298,8 @@ end;
 
 { Direct GitHub fallback for mpv: resolve the latest shinchiro/mpv-winbuild-cmake
   release asset URL (mpv-x86_64-*.7z), never mpv.net. }
+function ScanUrl(var Rest: String): String; forward;
+
 function ResolveMpvDirectUrl: String;
 var
   Json: TStringList;

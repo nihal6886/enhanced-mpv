@@ -830,7 +830,9 @@ async function play(payload, mode) {
   appendLaunchLog("[" + new Date().toISOString() + "] play mode=" + (wantQueue ? "queue" : "replace") +
     " startTime=" + resumeStart(payload.startTime, payload.duration) +
     " duration=" + (Number.isFinite(Number(payload.duration)) ? Number(payload.duration) : 0) +
-    " source=" + String(payload.startTimeSource || "none").slice(0, 200));
+    " source=" + String(payload.startTimeSource || "none").slice(0, 200) +
+    " url=" + String(url).replace(/[?&](?:sign|token|KEY\d+)=[^&]*/g, "<redacted>") +
+    " audioUrl=" + String(audioUrl || "").replace(/[?&](?:sign|token|KEY\d+)=[^&]*/g, "<redacted>"));
 
   // Split HLS video + audio behind auth: relay both through localhost so every
   // playlist, key, init segment, and media segment carries the tab's headers.

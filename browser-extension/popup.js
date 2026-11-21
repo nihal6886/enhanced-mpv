@@ -396,7 +396,7 @@ async function pausePlaybackInFrame(tabId, best) {
   }
 }
 
-async function go(action, explicitUrl) {
+async function go(action, explicitUrl, forcePageUrl = false) {
   const progressEl = $("launchProgress");
   const primaryActions = document.querySelector(".primary-actions");
   
@@ -454,6 +454,7 @@ async function go(action, explicitUrl) {
     startTime,
     duration,
     startTimeSource,
+    forcePageUrl,
   });
   
   // Step 3: Opening Enhanced MPV
@@ -486,7 +487,7 @@ $("play").addEventListener("click", () => go("play"));
 $("queue").addEventListener("click", () => go("queue"));
 $("fallback").addEventListener("click", async () => {
   const tab = await activeTab();
-  if (tab && tab.url) await go("play", tab.url);
+  if (tab && tab.url) await go("play", tab.url, true);
 });
 $("options").addEventListener("click", () => chrome.runtime.openOptionsPage());
 $("autoIntercept").addEventListener("change", async (e) => {
