@@ -43,7 +43,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          $iscc = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
           if (-not (Test-Path $iscc)) {
             $iscc = (Get-ChildItem "C:\Program Files*\Inno Setup*\ISCC.exe" -ErrorAction SilentlyContinue |
               Select-Object -First 1).FullName

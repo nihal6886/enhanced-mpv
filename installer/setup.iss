@@ -111,7 +111,7 @@ var
 
   RceditExe: String;
 
-{ ----------------------------------------------------------------- helpers -- }
+// ----------------------------------------------------------------- helpers --
 
 function FirstExisting(const Paths: array of String): String;
 var
@@ -189,7 +189,7 @@ begin
     ExpandConstant('{pf32}\Mozilla Firefox\firefox.exe')]);
 end;
 
-{ ------------------------------------------------------------------- state -- }
+// ------------------------------------------------------------------- state --
 
 function UseChrome: Boolean;
 begin
@@ -273,17 +273,17 @@ begin
     or FileExists(ExpandConstant('{app}\bin\yt-dlp.exe'));
 end;
 
-function WantMpvArchiveFile(Param: String): Boolean;
+function WantMpvArchiveFile: Boolean;
 begin
   Result := WantMpvArchive and FileExists(ExpandConstant('{tmp}\mpv.7z'));
 end;
 
-function WantYtDlpArchiveFile(Param: String): Boolean;
+function WantYtDlpArchiveFile: Boolean;
 begin
   Result := WantYtDlpArchive and FileExists(ExpandConstant('{tmp}\yt-dlp.exe'));
 end;
 
-{ --------------------------------------------------------------- winget io -- }
+// --------------------------------------------------------------- winget io --
 
 function RunWinget(const PkgId: String): Boolean;
 var
@@ -296,8 +296,8 @@ begin
   Result := Result and (ResultCode = 0);
 end;
 
-{ Direct GitHub fallback for mpv: resolve the latest shinchiro/mpv-winbuild-cmake
-  release asset URL (mpv-x86_64-*.7z), never mpv.net. }
+// Direct GitHub fallback for mpv: resolve the latest shinchiro/mpv-winbuild-cmake
+// release asset URL (mpv-x86_64-*.7z), never mpv.net.
 function ScanUrl(var Rest: String): String; forward;
 
 function ResolveMpvDirectUrl: String;
@@ -359,10 +359,10 @@ begin
   Log('Direct mpv download staged at {tmp}\mpv.7z; the [Files] extractarchive entry will unpack it.');
 end;
 
-{ ------------------------------------------------------------ github fetch -- }
+// ------------------------------------------------------------ github fetch --
 
-{ Consume one "browser_download_url":"<url>" entry from Rest, returning the url
-  and mutating Rest to continue scanning. }
+// Consume one "browser_download_url":"<url>" entry from Rest, returning the url
+// and mutating Rest to continue scanning.
 function ScanUrl(var Rest: String): String;
 var
   P, Q: Integer;
@@ -443,7 +443,7 @@ begin
       'yt-dlp.exe', '');
   if WantMpvArchive then
   begin
-    { If InstallMpvDirect already staged the archive, skip re-downloading it. }
+// If InstallMpvDirect already staged the archive, skip re-downloading it.
     if FileExists(ExpandConstant('{tmp}\mpv.7z')) then
       Log('mpv archive already staged by direct download; skipping re-download.')
     else
@@ -479,14 +479,14 @@ begin
     DownloadPage.Hide;
   end;
 
-  { Tie the install-time file checks to what actually landed on disk. }
+// Tie the install-time file checks to what actually landed on disk.
   WantYtDlpArchive := WantYtDlpArchive and FileExists(ExpandConstant('{tmp}\yt-dlp.exe'));
   WantMpvArchive := WantMpvArchive and FileExists(ExpandConstant('{tmp}\mpv.7z'));
   WantModernZLua := WantModernZLua and FileExists(ExpandConstant('{tmp}\modernz.lua'));
   WantModernZFont := WantModernZFont and FileExists(ExpandConstant('{tmp}\modernz-icons.ttf'));
 end;
 
-{ -------------------------------------------------------------- file utils -- }
+// -------------------------------------------------------------- file utils --
 
 procedure CopyTree(const Src, Dst: String);
 var
@@ -590,14 +590,14 @@ begin
   end;
 end;
 
-{ Resolve the player binary for the Start Menu shortcut, preferring the value
-  the installer just wrote to MPV_PATH, then the standard install folders. }
+// Resolve the player binary for the Start Menu shortcut, preferring the value
+// the installer just wrote to MPV_PATH, then the standard install folders.
 function MpvExeForIcon(Param: String): String;
 var
   Exe: String;
 begin
   Exe := '';
-  { Prioritize the stamped EnhancedMPV build with our custom icon. }
+// Prioritize the stamped EnhancedMPV build with our custom icon.
   Exe := ExpandConstant('{localappdata}\Programs\EnhancedMPV\enhanced-mpv.exe');
   if FileExists(Exe) and IsNativeMpv(Exe) then
   begin
@@ -618,13 +618,13 @@ begin
   Result := Exe;
 end;
 
-function HaveMpvForIcon(Param: String): Boolean;
+function HaveMpvForIcon: Boolean;
 begin
   Result := MpvExeForIcon('') <> '';
 end;
 
-{ Flatten an archive that extracted into a single sub-folder so mpv.exe lands
-  next to its DLLs at the root of the target directory. }
+// Flatten an archive that extracted into a single sub-folder so mpv.exe lands
+// next to its DLLs at the root of the target directory.
 procedure NormalizeMpvDir(const Dir: String);
 var
   FS: TFindRec;
@@ -652,7 +652,7 @@ begin
   end;
 end;
 
-{ ------------------------------------------------------------------ deploy -- }
+// ------------------------------------------------------------------ deploy --
 
 procedure DeployMpvConfig;
 var
@@ -755,7 +755,7 @@ begin
     end;
   end;
 
-  { Per-user fallback that needs no admin rights. }
+// Per-user fallback that needs no admin rights.
   RegWriteStringValue(HKEY_CURRENT_USER, 'Software\Mozilla\Firefox\Extensions', CGeckoId, Src);
   Log('Registered Firefox add-on via HKCU\Software\Mozilla\Firefox\Extensions');
 end;
@@ -809,6 +809,7 @@ end;
 
 procedure FinalizeDeps;
 var
+  RceditExitCode: Integer;
   MpvDir, MpvExe, YtdlExe, HookDir, HookFile: String;
   EnhancedMpvDir, EnhancedMpvExe, IconPath, RceditCache, ResultCode: String;
 begin
@@ -831,7 +832,7 @@ begin
   else
     MpvExe := '';
 
-  { Create EnhancedMPV folder and copy mpv.exe there as enhanced-mpv.exe, then stamp the icon. }
+// Create EnhancedMPV folder and copy mpv.exe there as enhanced-mpv.exe, then stamp the icon.
   EnhancedMpvDir := ExpandConstant('{localappdata}\Programs\EnhancedMPV');
   ForceDirectories(EnhancedMpvDir);
   EnhancedMpvExe := AddBackslash(EnhancedMpvDir) + 'enhanced-mpv.exe';
@@ -842,7 +843,7 @@ begin
     if CopyFile(MpvExe, EnhancedMpvExe, False) then
     begin
       Log('Copied mpv to ' + EnhancedMpvExe);
-      { Download rcedit-x64.exe from electron/rcedit releases if not cached. }
+// Download rcedit-x64.exe from electron/rcedit releases if not cached.
       RceditCache := AddBackslash(EnhancedMpvDir) + 'rcedit-x64.exe';
       if not FileExists(RceditCache) then
       begin
@@ -851,7 +852,7 @@ begin
           DownloadTemporaryFile(CRceditUrl, 'rcedit-x64.exe', '', nil);
           if FileExists(ExpandConstant('{tmp}\rcedit-x64.exe')) then
           begin
-            MoveFile(ExpandConstant('{tmp}\rcedit-x64.exe'), RceditCache);
+            RenameFile(ExpandConstant('{tmp}\rcedit-x64.exe'), RceditCache);
             Log('rcedit cached at ' + RceditCache);
           end;
         except
@@ -864,8 +865,9 @@ begin
         if FileExists(IconPath) then
         begin
           Log('Stamping Enhanced MPV icon into ' + EnhancedMpvExe + '...');
-          ResultCode := '';
-          Exec(ExpandConstant('{cmd}'), '/c "' + RceditCache + '" "' + EnhancedMpvExe + '" --set-icon "' + IconPath + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+          ResultCode := '-1';
+          if Exec(ExpandConstant('{cmd}'), '/c "' + RceditCache + '" "' + EnhancedMpvExe + '" --set-icon "' + IconPath + '"', '', SW_HIDE, ewWaitUntilTerminated, RceditExitCode) then
+            ResultCode := IntToStr(RceditExitCode);
           if (ResultCode = '0') and FileExists(EnhancedMpvExe) then
             Log('Icon stamped successfully.')
           else
@@ -903,7 +905,7 @@ begin
   Log('Copied extension path to clipboard: ' + P);
 end;
 
-{ -------------------------------------------------------------- wizard io -- }
+// -------------------------------------------------------------- wizard io --
 
 function ProgIdKind(const ProgId: String): Integer;
 var
@@ -985,14 +987,14 @@ begin
     if (not MpvOk) and HaveWinget then
     begin
       ProgressPage.SetText('Installing mpv via winget', 'This can take a minute');
-      { Try the canonical vanilla mpv winget ID first, then the zhongfly mirror. }
+// Try the canonical vanilla mpv winget ID first, then the zhongfly mirror.
       MpvOk := RunWinget('mpv.mpv');
       if not MpvOk then
         MpvOk := RunWinget('zhongfly.mpv');
       if not MpvOk then
       begin
-        { Direct GitHub fallback: fetch the latest shinchiro/mpv-winbuild-cmake
-          release asset and extract it into {localappdata}\Programs\mpv. }
+// Direct GitHub fallback: fetch the latest shinchiro/mpv-winbuild-cmake
+// release asset and extract it into {localappdata}\Programs\mpv.
         MpvOk := InstallMpvDirect;
       end;
     end;
@@ -1006,9 +1008,9 @@ begin
     end;
     WantYtDlpArchive := not YtdlOk;
 
-    { Mirror install.ps1: skip ModernZ only when both assets already exist
-      (either already deployed to the user mpv dir, or bundled offline in
-      {app}\mpv from the staging payload). }
+// Mirror install.ps1: skip ModernZ only when both assets already exist
+// (either already deployed to the user mpv dir, or bundled offline in
+// app}\mpv from the staging payload).
     WantModernZLua := not ((FileExists(ExpandConstant('{userappdata}\mpv\scripts\modernz.lua')) and FileExists(ExpandConstant('{userappdata}\mpv\fonts\modernz-icons.ttf'))) or (FileExists(ExpandConstant('{app}\mpv\scripts\modernz.lua')) and FileExists(ExpandConstant('{app}\mpv\fonts\modernz-icons.ttf'))));
     WantModernZFont := not ((FileExists(ExpandConstant('{userappdata}\mpv\fonts\modernz-icons.ttf'))) or (FileExists(ExpandConstant('{app}\mpv\fonts\modernz-icons.ttf'))));
 
