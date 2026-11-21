@@ -1,0 +1,82 @@
+"use strict";
+
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+function configDir() {
+  return path.join(os.homedir(), ".enhanced-mpv");
+}
+
+function configPath() {
+  return path.join(configDir(), "config.json");
+}
+
+const DEFAULTS = {
+  preferredSubtitleLanguages: ["eng", "spa"],
+  nativeAudioLanguages: ["eng", "en"],
+  opensubtitles: { apiKey: "", username: "", password: "" },
+  videoQuality: "best",
+  queueMode: "replace",
+  autoIntercept: false,
+  autoInterceptDomains: [],
+  clipboardWatch: false,
+  ytdlFormat: "bestvideo*+bestaudio/best",
+  keepWarm: true,
+  profiles: [
+    { name: "Anime Upscale", mpvProfile: "anime-upscale" },
+    { name: "Battery Saver", mpvProfile: "battery-saver" },
+    { name: "Cinema HDR", mpvProfile: "cinema-hdr" },
+  ],
+};
+
+function ensureDir(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+}
+
+function readConfig() {
+  ensureDir(configDir());
+  const p = configPath();
+  if (!fs.existsSync(p)) {
+    fs.writeFileSync(p, JSON.stringify(DEFAULTS, null, 2), "utf8");
+    return { ...DEFAULTS };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(p, "utf8"));
+    return { ...DEFAULTS, ...parsed, opensubtitles: { ...DEFAULTS.opensubtitles, ...(parsed.opensubtitles || {}) } };
+  } catch {
+    return { ...DEFAULTS };
+  }
+}
+
+function writeConfig(next) {
+  ensureDir(configDir());
+  const merged = { ...readConfig(), ...next };
+  if (next && next.opensubtitles) {
+    merged.opensubtitles = { ...readConfig().opensubtitles, ...next.opensubtitles };
+  }
+  fs.writeFileSync(configPath(), JSON.stringify(merged, null, 2), "utf8");
+  return merged;
+}
+
+function ipcPath() {
+  if (process.platform === "win32") {
+    return "\\\\.\\pipe\\enhanced-mpv-socket";
+  }
+  return path.join(configDir(), "mpv-socket");
+}
+
+function tempSubDir() {
+  return path.join(os.tmpdir(), "enhanced-mpv-subs");
+}
+
+module.exports = {
+  DEFAULTS,
+  configDir,
+  configPath,
+  readConfig,
+  writeConfig,
+  ipcPath,
+  tempSubDir,
+  ensureDir,
+};

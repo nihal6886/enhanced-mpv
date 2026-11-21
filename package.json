@@ -1,0 +1,26 @@
+{
+  "name": "enhanced-mpv",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cross-platform mpv media ecosystem with uosc UI, subtitle automation, and a Manifest V3 browser bridge",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "native-host/index.js",
+  "scripts": {
+    "test": "node --test native-host/test/*.test.js",
+    "lint:js": "eslint browser-extension native-host scripts/package-extension.js --max-warnings 0",
+    "lint:lua": "luacheck mpv-config/scripts",
+    "lint": "npm run lint:js && npm run lint:lua",
+    "doctor": "node native-host/doctor.js",
+    "package": "node scripts/package-extension.js",
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
+    "build:installer": "iscc installer\\setup.iss",
+    "generate-icons": "node scripts/generate-icons.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "eslint": "^9.15.0"
+  }
+}

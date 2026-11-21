@@ -1,0 +1,11 @@
+{
+  "name": "com.enhanced.mpv.host",
+  "description": "Enhanced MPV Native Messaging Host",
+  "path": "HOST_PATH",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://EXTENSION_ID/",
+    "chrome-extension://docojpbeobpfjdfhlfjhdijfnbekfpob/",
+    "chrome-extension://oaholhjabdiapfijakeojjjoideniecl/"
+  ]
+}

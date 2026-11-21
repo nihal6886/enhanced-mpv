@@ -1,0 +1,9 @@
+{
+  "name": "com.enhanced.mpv.host",
+  "description": "Enhanced MPV Native Messaging Host",
+  "path": "HOST_PATH",
+  "type": "stdio",
+  "allowed_extensions": [
+    "enhanced-mpv@enhanced-mpv.local"
+  ]
+}

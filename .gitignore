@@ -1,0 +1,19 @@
+node_modules/
+dist/
+installer/staging/
+*.zip
+*.xpi
+*.part
+*.tmp
+.DS_Store
+Thumbs.db
+*.log
+coverage/
+.env
+last-launch.log
+.enhanced-mpv-local/
+browser-extension/icons/*.png
+!browser-extension/icons/.gitkeep
+# Private extension key (never commit)
+extension-key.pem
+scripts/extension-key.pem

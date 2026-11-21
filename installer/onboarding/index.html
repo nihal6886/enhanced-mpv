@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Enhanced MPV: Load Extension</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d0f12'/%3E%3Cpath d='M12 9.5L23.5 16L12 22.5V9.5Z' fill='%2330d158'/%3E%3C/svg%3E" />
+<style>
+  :root {
+    --term-font: "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    --bg-canvas: #07080a;
+    --grid-line: rgba(255, 255, 255, 0.032);
+    --neon-emerald: rgba(48, 209, 88, 0.14);
+    --neon-cyan: rgba(100, 210, 255, 0.08);
+    --neon-rim: rgba(48, 209, 88, 0.09);
+    --term-black: #000000;
+    --term-elevated: #0a0a0c;
+    --term-hover: #121215;
+    --titlebar-bg: #262629;
+    --titlebar-border: #38383c;
+    --border: #222225;
+    --border-bright: #3a3a3f;
+    --text: #f2f2f2;
+    --muted: #8e8e93;
+    --dim: #636366;
+    --green: #30d158;
+    --green-soft: rgba(48, 209, 88, 0.14);
+    --green-border: rgba(48, 209, 88, 0.35);
+    --cyan: #64d2ff;
+    --amber: #ffd60a;
+  }
+
+  /* Universal reset so buttons and inputs inherit the terminal font */
+  *, *::before, *::after {
+    box-sizing: border-box;
+    font-family: var(--term-font);
+  }
+
+  body {
+    position: relative;
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 28px 16px;
+    background-color: var(--bg-canvas);
+    background-image:
+      linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+    background-size: 28px 28px, 28px 28px;
+    background-position: center center, center center;
+    color: var(--text);
+    font-family: var(--term-font);
+    font-size: 13px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+  }
+
+  /* Animated Ambient Neon Background Gradient */
+  body::before {
+    content: "";
+    position: fixed;
+    top: -40vmax;
+    left: -40vmax;
+    width: 180vmax;
+    height: 180vmax;
+    z-index: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(circle at 30% 35%, rgba(48, 209, 88, 0.36) 0%, rgba(48, 209, 88, 0.14) 24%, transparent 52%),
+      radial-gradient(circle at 70% 65%, rgba(100, 210, 255, 0.30) 0%, rgba(100, 210, 255, 0.10) 24%, transparent 50%),
+      radial-gradient(circle at 65% 28%, rgba(48, 209, 88, 0.24) 0%, transparent 45%);
+    filter: blur(36px);
+    -webkit-filter: blur(36px);
+    transform-origin: center center;
+    will-change: transform;
+    animation: ambientGradientShift 8s ease-in-out infinite alternate;
+  }
+
+  @keyframes ambientGradientShift {
+    0% {
+      transform: translate3d(-14%, -12%, 0) scale(0.92) rotate(-25deg);
+    }
+    33% {
+      transform: translate3d(10%, -14%, 0) scale(1.08) rotate(12deg);
+    }
+    66% {
+      transform: translate3d(14%, 10%, 0) scale(0.96) rotate(42deg);
+    }
+    100% {
+      transform: translate3d(-10%, 14%, 0) scale(1.1) rotate(75deg);
+    }
+  }
+
+  /* macOS Terminal Window Frame */
+  main {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    max-width: 660px;
+    background: var(--term-black);
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    border-top-color: rgba(255, 255, 255, 0.22);
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow:
+      0 32px 80px -12px rgba(0, 0, 0, 0.96),
+      0 12px 32px -8px rgba(0, 0, 0, 0.8),
+      inset 0 1px 0 rgba(255, 255, 255, 0.14),
+      0 0 42px -16px var(--neon-rim);
+    transition: box-shadow 0.3s ease, border-color 0.3s ease;
+  }
+
+  main.is-complete {
+    border-color: rgba(48, 209, 88, 0.22);
+    border-top-color: rgba(48, 209, 88, 0.36);
+    box-shadow:
+      0 32px 80px -12px rgba(0, 0, 0, 0.96),
+      0 12px 32px -8px rgba(0, 0, 0, 0.8),
+      inset 0 1px 0 rgba(48, 209, 88, 0.24),
+      0 0 54px -16px rgba(48, 209, 88, 0.2);
+  }
+
+  /* macOS Terminal Titlebar */
+  .titlebar {
+    display: grid;
+    grid-template-columns: 72px 1fr 72px;
+    align-items: center;
+    height: 30px;
+    padding: 0 12px;
+    background: linear-gradient(180deg, #323236 0%, #242427 100%);
+    border-bottom: 1px solid #141416;
+    user-select: none;
+  }
+
+  .traffic-lights {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .tl {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.35);
+  }
+
+  .tl-close { background: #ff5f57; }
+  .tl-min   { background: #febc2e; }
+  .tl-zoom  { background: #28c840; }
+
+  .window-title {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    color: #d1d1d6;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .folder-glyph {
+    color: var(--cyan);
+    font-weight: 700;
+  }
+
+  /* Pitch-Black Terminal Viewport */
+  .terminal-body {
+    background: var(--term-black);
+    padding: 20px 24px 24px;
+  }
+
+  .prompt-symbol {
+    color: var(--muted);
+  }
+
+  /* Session Header */
+  header {
+    padding-bottom: 16px;
+    margin-bottom: 18px;
+    border-bottom: 1px dashed var(--border-bright);
+  }
+
+  .top-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+  }
+
+  .eyebrow {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--green);
+    letter-spacing: 0.02em;
+  }
+
+  .status-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ascii-bar {
+    color: var(--green);
+    letter-spacing: -0.02em;
+  }
+
+  .status-badge {
+    padding: 1px 7px;
+    border-radius: 3px;
+    border: 1px solid var(--border-bright);
+    background: var(--term-elevated);
+    color: var(--text);
+  }
+
+  main.is-complete .status-badge {
+    color: var(--green);
+    border-color: var(--green-border);
+    background: var(--green-soft);
+  }
+
+  h1 {
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text);
+    margin: 0 0 6px;
+    letter-spacing: -0.01em;
+  }
+
+  header p {
+    margin: 0;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  /* Interactive chrome://extensions Terminal Mockup Bar */
+  .mockup {
+    margin: 0 0 18px;
+    padding: 12px 14px;
+    background: var(--term-black);
+    border: 1px solid var(--border-bright);
+    border-radius: 6px;
+  }
+
+  .mockup-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding-bottom: 9px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+
+  .mockup-url {
+    color: var(--cyan);
+  }
+
+  .mockup-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .mockup-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--border-bright);
+    background: var(--term-elevated);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text);
+    transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+  }
+
+  .mockup[data-highlight="step-2"] .mockup-btn,
+  .mockup[data-step2="true"] .mockup-btn {
+    border-color: var(--green);
+    background: var(--green-soft);
+    color: var(--green);
+  }
+
+  .pasted-pill {
+    font-size: 11.5px;
+    color: var(--green);
+    opacity: 0;
+    transform: translateY(2px);
+    transition: opacity 0.18s ease, transform 0.18s ease;
+  }
+
+  .mockup[data-highlight="step-3"] .pasted-pill,
+  .mockup[data-step3="true"] .pasted-pill {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .mockup-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--muted);
+    transition: color 0.15s ease;
+  }
+
+  .mockup[data-highlight="step-1"] .mockup-toggle,
+  .mockup[data-step1="true"] .mockup-toggle {
+    color: var(--text);
+  }
+
+  .switch {
+    width: 30px;
+    height: 16px;
+    border-radius: 99px;
+    border: 1px solid var(--border-bright);
+    background: #18181b;
+    position: relative;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+  }
+
+  .switch::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: transform 0.2s ease, background-color 0.2s ease;
+  }
+
+  .mockup[data-highlight="step-1"] .switch {
+    border-color: var(--green);
+  }
+
+  .mockup[data-step1="true"] .switch {
+    background: var(--green);
+    border-color: var(--green);
+  }
+
+  .mockup[data-step1="true"] .switch::after {
+    transform: translateX(14px);
+    background: #000000;
+  }
+
+  /* Terminal Checklist */
+  .checklist-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11.5px;
+    color: var(--dim);
+    margin-bottom: 8px;
+  }
+
+  .os-toggle {
+    appearance: none;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 7px;
+    color: var(--muted);
+    font-size: 11px;
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+
+  .os-toggle:hover {
+    border-color: var(--border-bright);
+    color: var(--text);
+  }
+
+  .checklist {
+    display: grid;
+    gap: 6px;
+  }
+
+  .task {
+    display: grid;
+    grid-template-columns: 28px 1fr;
+    gap: 10px;
+    align-items: start;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--term-black);
+    cursor: pointer;
+    user-select: none;
+    transition: background-color 0.14s ease, border-color 0.14s ease;
+  }
+
+  .task:hover {
+    background: var(--term-hover);
+    border-color: var(--border-bright);
+  }
+
+  .task.checked {
+    border-color: #19261d;
+    background: #040805;
+  }
+
+  /* Terminal-style [ ] / [x] Checkbox */
+  .check-box {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: 1px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--muted);
+  }
+
+  .task input[type="checkbox"] {
+    position: absolute;
+    opacity: 0;
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    cursor: pointer;
+  }
+
+  .check-glyph::before {
+    content: "[ ]";
+    color: var(--muted);
+  }
+
+  .task input[type="checkbox"]:focus-visible + .check-glyph {
+    outline: 1px dashed var(--green);
+    outline-offset: 2px;
+  }
+
+  .task input[type="checkbox"]:checked + .check-glyph::before {
+    content: "[x]";
+    color: var(--green);
+  }
+
+  .task-title {
+    display: block;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 3px;
+  }
+
+  .step-num {
+    color: var(--green);
+    margin-right: 4px;
+  }
+
+  .task-desc {
+    display: block;
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  .task-desc strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .task.checked .task-title {
+    text-decoration: line-through;
+    color: var(--dim);
+  }
+
+  .task.checked .step-num {
+    color: var(--dim);
+  }
+
+  .task.checked .task-desc {
+    opacity: 0.55;
+  }
+
+  /* Physical Terminal Keycaps */
+  kbd {
+    display: inline-block;
+    padding: 0 6px;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text);
+    background: #141417;
+    border: 1px solid #3c3c42;
+    border-bottom-width: 2px;
+    border-radius: 4px;
+  }
+
+  /* Footer Notes */
+  footer {
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--border-bright);
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+
+  footer p {
+    margin: 0 0 8px;
+  }
+
+  footer p:last-child {
+    margin-bottom: 0;
+  }
+
+  footer strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  /* Live Interactive Shell Prompt Line */
+  .shell-footer {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 12.5px;
+    flex-wrap: wrap;
+  }
+
+  .cursor-block {
+    display: inline-block;
+    width: 7.5px;
+    height: 14px;
+    background: var(--text);
+    vertical-align: -2px;
+    margin-left: 4px;
+    animation: blinkCursor 1.1s steps(1, end) infinite;
+  }
+
+  @keyframes blinkCursor {
+    0%, 49% { opacity: 1; }
+    50%, 100% { opacity: 0; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    body::before,
+    .cursor-block { animation: none; }
+  }
+
+  .shortcut-hint {
+    font-size: 11px;
+    color: var(--dim);
+  }
+
+  @media (max-width: 560px) {
+    .terminal-body {
+      padding: 16px 16px 18px;
+    }
+    .task {
+      padding: 9px 10px;
+    }
+  }
+</style>
+</head>
+<body>
+  <main id="terminal-window">
+    <!-- macOS Terminal Window Chrome -->
+    <div class="titlebar">
+      <div class="traffic-lights" aria-hidden="true">
+        <span class="tl tl-close"></span>
+        <span class="tl tl-min"></span>
+        <span class="tl tl-zoom"></span>
+      </div>
+
+      <div class="window-title">
+        <span class="folder-glyph" aria-hidden="true">~</span>
+        <span>enhanced-mpv : setup</span>
+      </div>
+
+      <div aria-hidden="true"></div>
+    </div>
+
+    <!-- Pitch-Black Terminal Viewport -->
+    <div class="terminal-body">
+      <header>
+        <div class="top-row">
+          <span class="eyebrow">setup: native host installed</span>
+          <span class="status-wrap" aria-live="polite">
+            <span class="ascii-bar" id="ascii-bar">[░░░░░░░░░░░░]</span>
+            <span class="status-badge" id="status">0 / 3</span>
+          </span>
+        </div>
+        <h1>Add the extension to your browser</h1>
+        <p>The native player is installed on your machine, and the extension folder path is already copied to your clipboard.</p>
+      </header>
+
+      <!-- Interactive Browser Toolbar Preview -->
+      <div class="mockup" id="mockup" aria-hidden="true">
+        <div class="mockup-top">
+          <span class="mockup-url">chrome://extensions</span>
+          <span>extensions bar</span>
+        </div>
+        <div class="mockup-controls">
+          <span class="mockup-btn">Load unpacked</span>
+          <span class="pasted-pill">path pasted</span>
+          <span class="mockup-toggle">
+            Developer mode
+            <span class="switch"></span>
+          </span>
+        </div>
+      </div>
+
+      <div class="checklist-header">
+        <span>Click each step as you go, or press 1, 2, 3</span>
+        <button type="button" class="os-toggle" id="os-toggle" title="Switch shortcut key labels">
+          keys: auto
+        </button>
+      </div>
+
+      <div class="checklist">
+        <label class="task" data-step="1">
+          <span class="check-box">
+            <input type="checkbox" />
+            <span class="check-glyph" aria-hidden="true"></span>
+          </span>
+          <span>
+            <span class="task-title"><span class="step-num">1.</span>Turn on Developer mode</span>
+            <span class="task-desc">In the extensions tab that just opened, flip the Developer mode switch in the top-right corner.</span>
+          </span>
+        </label>
+
+        <label class="task" data-step="2">
+          <span class="check-box">
+            <input type="checkbox" />
+            <span class="check-glyph" aria-hidden="true"></span>
+          </span>
+          <span>
+            <span class="task-title"><span class="step-num">2.</span>Open the folder picker</span>
+            <span class="task-desc">Click <strong>Load unpacked</strong> in the top-left bar.</span>
+          </span>
+        </label>
+
+        <label class="task" data-step="3">
+          <span class="check-box">
+            <input type="checkbox" />
+            <span class="check-glyph" aria-hidden="true"></span>
+          </span>
+          <span>
+            <span class="task-title"><span class="step-num">3.</span>Paste the folder path</span>
+            <span class="task-desc">In the folder window, press <kbd id="mod-key">Ctrl</kbd> + <kbd>V</kbd> and press <kbd id="enter-key">Enter</kbd>.</span>
+          </span>
+        </label>
+      </div>
+
+      <footer>
+        <p><strong>Next:</strong> The extension connects automatically once loaded. No manual linking needed.</p>
+        <p><strong>Using Firefox?</strong> You can close this tab. The add-on was installed automatically.</p>
+      </footer>
+
+      <div class="shell-footer" aria-hidden="true">
+        <div>
+          <span class="prompt-symbol">%</span> <span id="shell-output">step 1 of 3</span><span class="cursor-block"></span>
+        </div>
+        <span class="shortcut-hint">keys 1, 2, 3</span>
+      </div>
+    </div>
+  </main>
+
+<script>
+  const win = document.getElementById('terminal-window');
+  const mockup = document.getElementById('mockup');
+  const tasks = Array.from(document.querySelectorAll('.task'));
+  const boxes = tasks.map((t) => t.querySelector('input[type="checkbox"]'));
+  const statusEl = document.getElementById('status');
+  const asciiBar = document.getElementById('ascii-bar');
+  const shellOutput = document.getElementById('shell-output');
+
+  // OS-aware keycap labels (auto-detects macOS with manual toggle button)
+  const osToggle = document.getElementById('os-toggle');
+  const modKey = document.getElementById('mod-key');
+  const enterKey = document.getElementById('enter-key');
+  let isMac = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent);
+
+  function renderKeys() {
+    modKey.textContent = isMac ? '⌘' : 'Ctrl';
+    enterKey.textContent = isMac ? 'Return' : 'Enter';
+    osToggle.textContent = isMac ? 'keys: macOS' : 'keys: Win/Linux';
+  }
+
+  osToggle.addEventListener('click', () => {
+    isMac = !isMac;
+    renderKeys();
+  });
+
+  renderKeys();
+
+  /**
+   * Updates the ASCII progress meter, status badge, toolbar preview states,
+   * and live terminal prompt line.
+   */
+  function update() {
+    const total = boxes.length;
+    const done = boxes.filter((b) => b.checked).length;
+    const isComplete = done === total;
+
+    boxes.forEach((b, idx) => {
+      tasks[idx].classList.toggle('checked', b.checked);
+      mockup.dataset[`step${idx + 1}`] = b.checked ? 'true' : 'false';
+    });
+
+    const slots = 12;
+    const filled = Math.round((done / total) * slots);
+    asciiBar.textContent = `[${'█'.repeat(filled)}${'░'.repeat(slots - filled)}]`;
+
+    win.classList.toggle('is-complete', isComplete);
+    statusEl.textContent = isComplete ? 'All set. Ready to play.' : `${done} / ${total}`;
+
+    // Point to the first unchecked step rather than assuming sequential checks
+    const nextUncheckedIdx = boxes.findIndex((b) => !b.checked);
+    shellOutput.textContent = isComplete
+      ? 'all set. ready to play.'
+      : `step ${nextUncheckedIdx + 1} of ${total}`;
+  }
+
+  // Hover highlight sync with chrome://extensions preview bar
+  tasks.forEach((task) => {
+    const step = task.dataset.step;
+    task.addEventListener('mouseenter', () => {
+      mockup.dataset.highlight = `step-${step}`;
+    });
+    task.addEventListener('mouseleave', () => {
+      delete mockup.dataset.highlight;
+    });
+  });
+
+  // Allow pressing 1, 2, or 3 on the keyboard to toggle steps like a CLI
+  document.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const idx = Number(e.key) - 1;
+    if (idx >= 0 && idx < boxes.length && document.activeElement !== boxes[idx]) {
+      boxes[idx].checked = !boxes[idx].checked;
+      update();
+    }
+  });
+
+  boxes.forEach((b) => b.addEventListener('change', update));
+  update();
+</script>
+</body>
+</html>

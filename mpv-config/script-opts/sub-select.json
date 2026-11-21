@@ -1,0 +1,60 @@
+[
+  {
+    "id": "english-audio-forced",
+    "alang": ["eng", "en", "english"],
+    "slang": ["forced", "forced-eng", "eng-forced", "en-forced", "signs", "songs", "signs-songs"],
+    "blacklist": ["commentary"]
+  },
+  {
+    "id": "japanese-audio-english-full",
+    "alang": ["jpn", "ja", "jp", "japanese"],
+    "slang": ["eng", "en", "english"],
+    "blacklist": ["forced", "signs", "commentary"]
+  },
+  {
+    "id": "korean-audio-english-full",
+    "alang": ["kor", "ko", "korean"],
+    "slang": ["eng", "en", "english"],
+    "blacklist": ["forced", "signs", "commentary"]
+  },
+  {
+    "id": "chinese-audio-english-full",
+    "alang": ["chi", "zho", "zh", "chs", "cht", "cmn", "chinese"],
+    "slang": ["eng", "en", "english"],
+    "blacklist": ["forced", "signs", "commentary"]
+  },
+  {
+    "id": "spanish-audio-english-full",
+    "alang": ["spa", "es", "spanish"],
+    "slang": ["eng", "en", "english"],
+    "blacklist": ["forced", "signs", "commentary"]
+  },
+  {
+    "id": "french-audio-english-full",
+    "alang": ["fra", "fre", "fr", "french"],
+    "slang": ["eng", "en", "english"],
+    "blacklist": ["forced", "signs", "commentary"]
+  },
+  {
+    "id": "german-audio-english-full",
+    "alang": ["ger", "deu", "de", "german"],
+    "slang": ["eng", "en", "english"],
+    "blacklist": ["forced", "signs", "commentary"]
+  },
+  {
+    "id": "other-foreign-audio-english-full",
+    "alang": ["ita", "it", "por", "pt", "rus", "ru", "ara", "ar", "hin", "hi", "tha", "th", "vie", "vi", "pol", "pl", "nld", "nl", "tur", "tr"],
+    "slang": ["eng", "en", "english"],
+    "blacklist": ["forced", "signs", "commentary"]
+  },
+  {
+    "id": "fallback-same-as-audio",
+    "alang": "*",
+    "slang": "${audio}"
+  },
+  {
+    "id": "fallback-english",
+    "alang": "*",
+    "slang": ["eng", "en"]
+  }
+]

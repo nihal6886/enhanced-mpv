@@ -1,0 +1,59 @@
+{
+  "manifest_version": 3,
+  "name": "Enhanced MPV",
+  "version": "1.0.0",
+  "description": "Play page videos in Enhanced MPV with captured streams and subtitles.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtl0Nv7MUKdQ58oqypJrF2UY00bMbAlMrFpfMEnwaOjgZlFdKjogakUdzHfbsnpyBiWipl5pSFzelc7E4w6PiO6IT8ESMD1jGAaQQDnPTMAQ/hVFcxrcvOPsKp7fZzimS8ra0qz1hFoG3SPH15RjqyrMmILrF42Li6yreHu7vV+52fKGPgXqwwZk1CNit8UukAc8SlBqwopTElud83LVyzzAnNRCAAxYcr4VxBjRAwH9S+36SdTIMwQblpXVjbiMlAJkOn+nmSrkicFEuqxHbydp/WeENuVAmNJXCX2wOftNubwPgUIRzrNcCxqgDqQ0UpSmZPKvD/yt9tPPSs/8cBwIDAQAB",
+  "action": {
+    "default_title": "Enhanced MPV",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "permissions": [
+    "nativeMessaging",
+    "contextMenus",
+    "storage",
+    "tabs",
+    "webRequest",
+    "scripting",
+    "activeTab",
+    "cookies",
+    "notifications",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "enhanced-mpv@enhanced-mpv.local",
+      "strict_min_version": "121.0"
+    }
+  }
+}

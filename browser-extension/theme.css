@@ -1,0 +1,95 @@
+:root {
+  color-scheme: dark light;
+  --bg: #101114;
+  --bg-elev: #1a1c22;
+  --fg: #f3f4f6;
+  --muted: #9aa0aa;
+  --accent: #5ee0a0;
+  --danger: #ff8d8d;
+  --border: #2a2d36;
+  --btn: #22252d;
+  --btn-fg: #f3f4f6;
+  font-family: Inter, Segoe UI, Helvetica Neue, sans-serif;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f4f5f7;
+    --bg-elev: #ffffff;
+    --fg: #12141a;
+    --muted: #5c6370;
+    --accent: #0b8f55;
+    --danger: #c13b3b;
+    --border: #d7dbe3;
+    --btn: #e8eaef;
+    --btn-fg: #12141a;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+body { min-width: 340px; }
+a { color: var(--accent); }
+button {
+  background: var(--btn);
+  color: var(--btn-fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font: inherit;
+}
+button.primary {
+  background: var(--accent);
+  color: #062014;
+  border-color: transparent;
+  font-weight: 650;
+}
+button.danger { color: var(--danger); }
+input, select, textarea {
+  background: var(--bg-elev);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+  width: 100%;
+}
+h1, h2 { font-weight: 650; }
+.muted { color: var(--muted); font-size: 12px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; }
+.card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  margin: 8px 0;
+}
+.error {
+  background: color-mix(in srgb, var(--danger) 16%, var(--bg-elev));
+  border: 1px solid var(--danger);
+  border-radius: 10px;
+  padding: 10px;
+  margin: 8px 0;
+}
+label { display: block; margin: 10px 0 4px; font-size: 13px; }
+.list { max-height: 180px; overflow: auto; }
+.item {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  word-break: break-all;
+}
+.badge {
+  display: inline-block;
+  background: var(--accent);
+  color: #062014;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 700;
+}
