@@ -233,11 +233,6 @@ local function reveal_window(hwnd)
   window_revealed = true
 end
 
--- Handle script-message bring-to-front from mpv-launcher.js
-mp.register_script_message("bring-to-front", function()
-  pcall(do_apply)
-end)
-
 local function do_apply()
   local hwnd = find_window()
   if not hwnd or hwnd == 0 then return end
@@ -254,6 +249,13 @@ end
 local function reapply()
   pcall(do_apply)
 end
+
+-- Handle script-message bring-to-front from mpv-launcher.js (a reused window
+-- must surface again even after it was revealed once).
+mp.register_script_message("bring-to-front", function()
+  window_revealed = false
+  pcall(do_apply)
+end)
 
 -- IMMEDIATE reveal at script load (top-level) for <100ms window popup
 -- Run once immediately, then again on vo-configured when GPU window is ready

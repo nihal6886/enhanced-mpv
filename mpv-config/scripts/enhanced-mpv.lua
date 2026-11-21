@@ -16,19 +16,6 @@ local opts = {
 }
 options.read_options(opts, "enhanced_mpv")
 
--- Warm standby: when keepWarm=true in config, 'q' should stop playback
--- and return to idle (force-window=no) instead of quitting mpv.
-local function warm_standby_quit()
-  local cfg = user_config()
-  if cfg.keepWarm then
-    mp.commandv("stop")
-    mp.set_property("force-window", "no")
-    mp.set_property("window-minimized", "yes")
-    return
-  end
-  mp.commandv("quit")
-end
-
 local bookmarks = {}
 local clipboard_timer = nil
 local last_clip = ""
@@ -95,6 +82,19 @@ end
 
 local function user_config()
   return load_json(utils.join_path(cfg_dir(), "config.json")) or {}
+end
+
+-- Warm standby: when keepWarm=true in config, 'q' should stop playback
+-- and return to idle (force-window=no) instead of quitting mpv.
+local function warm_standby_quit()
+  local cfg = user_config()
+  if cfg.keepWarm then
+    mp.commandv("stop")
+    mp.set_property("force-window", "no")
+    mp.set_property("window-minimized", "yes")
+    return
+  end
+  mp.commandv("quit")
 end
 
 local function run_async(args, timeout, cb)
@@ -462,11 +462,9 @@ local function parse_srt(data)
       t0 = tonumber(a1) * 3600 + tonumber(b1) * 60 + tonumber(a2) + tonumber(b2) / 1000
       t1 = tonumber(c1) * 3600 + tonumber(d1) * 60 + tonumber(c2) + tonumber(d2) / 1000
       text = ""
-    elseif line:match("^%d+$") then
-      -- cue index
     elseif line == "" then
       flush()
-    elseif t0 then
+    elseif t0 and not line:match("^%d+$") then -- skip bare cue indices
       text = (text == "" or not text) and line or (text .. " " .. line)
     end
   end

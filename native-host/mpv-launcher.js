@@ -21,6 +21,8 @@ const {
 } = require("./sanitizer");
 const { startRelay, startMasterRelay } = require("./stream-relay");
 
+const RELAY_URL_RE = /^http:\/\/127\.0\.0\.1:\d+\/[a-f0-9]+\/(?:[a-z]+\/)?(index\.m3u8|master\.m3u8)/i;
+
 const TEMP_SUB_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 // Cached mpv binary path - resolved once at startup, never re-probed on hot path
@@ -202,8 +204,30 @@ function resolveYtdlFormat(payload, cfg) {
 
 function isNativeMpv(bin) {
   const value = String(bin || "");
-  return /^mpv(?:\.exe|\.com)?$/i.test(path.basename(value))
+  // Split on both separators so Windows paths are recognised on every host OS.
+  const base = value.split(/[\\/]/).pop();
+  return /^(?:enhanced-)?mpv(?:\.exe|\.com)?$/i.test(base)
     && !/(^|[\\/])mpv\.net([\\/]|$)/i.test(value);
+}
+
+// Resume only from a real mid-playback position: > 3 s in, a finite duration
+// over 15 s, and at least 10 s before the end. Returns whole seconds or 0.
+function resumeStart(startTime, duration) {
+  const s = Number(startTime);
+  const d = Number(duration);
+  if (!Number.isFinite(s) || !Number.isFinite(d)) return 0;
+  if (s > 3 && d > 15 && s < d - 10) return Math.floor(s);
+  return 0;
+}
+
+function authHeaderObject(audioHeaders) {
+  const h = audioHeaders || {};
+  const out = {};
+  if (h.referer) out.Referer = h.referer;
+  if (h.origin) out.Origin = h.origin;
+  if (h.userAgent) out["User-Agent"] = h.userAgent;
+  if (h.cookie) out.Cookie = h.cookie;
+  return out;
 }
 
 function buildArgs(payload, subFiles, _mpvBin) {
@@ -219,47 +243,22 @@ function buildArgs(payload, subFiles, _mpvBin) {
   const url = payload.url;
   const audioUrl = payload.audioUrl;
   const isDirectStream = /\.(m3u8|mpd|mp4|mkv|webm)(?:$|[?#])/i.test(url);
-  const isRelayUrl = /^http:\/\/127\.0\.0\.1:\d+\/[a-f0-9]+\/(index\.m3u8|master\.m3u8)/i.test(url);
+  const isRelayUrl = RELAY_URL_RE.test(url);
   const isMasterRelay = payload.isMasterRelay === true;
-  
-  // Also check if audio URL (for --external-file) is a relay URL
   const relayedAudioUrl = payload.relayedAudioUrl;
-  const audioIsRelayUrl = relayedAudioUrl && /^http:\/\/127\.0\.0\.1:\d+\/[a-f0-9]+\/(index\.m3u8|master\.m3u8)/i.test(relayedAudioUrl);
-  
-  if (headers.length) {
-    args.push("--http-header-fields=" + joinHeaderFields(headers));
-    // Also pass headers via --demuxer-lavf-o for HLS/DASH segment requests (.ts, .m4s, etc.)
-    // so every segment carries valid Referer/Origin/User-Agent for hotlink-protected CDNs.
-    // Only for direct stream/manifest URLs; yt-dlp page URLs manage their own headers.
-    if (isDirectStream || isRelayUrl) {
-      // Format as valid HTTP headers: "Header: Value\r\nHeader: Value\r\n"
-      // Escape backslashes and commas for mpv's key-value option parser.
-      const lavfHeaders = headers.map(h => {
-        const idx = h.indexOf(":");
-        if (idx > 0) {
-          const key = h.slice(0, idx).trim();
-          const value = h.slice(idx + 1).trim();
-          return key + ": " + value.replace(/\\/g, "\\\\").replace(/,/g, "\\,");
-        }
-        return h.replace(/\\/g, "\\\\").replace(/,/g, "\\,");
-      }).join("\\r\\n") + "\\r\\n";
-      args.push("--demuxer-lavf-o=headers=" + lavfHeaders);
-    }
-  }
-  // A separate audio track is paired: mpv needs the relayed audio URL as an
-  // external file, the first audio track selected, and ffmpeg allowed to read
-  // every extension so the audio .m3u8/.aac/.m4a is never skipped.
+  const audioIsRelayUrl = Boolean(relayedAudioUrl && RELAY_URL_RE.test(relayedAudioUrl));
+
+  // mpv forwards --http-header-fields to libavformat itself (real CRLF
+  // separators) for the manifest and every HLS/DASH segment, so the headers
+  // are not duplicated into --demuxer-lavf-o.
+  if (headers.length) args.push("--http-header-fields=" + joinHeaderFields(headers));
+
+  // A separate audio track is paired: ffmpeg must be allowed to read every
+  // extension so the audio .m3u8/.aac/.m4a is never skipped. -append keeps the
+  // reconnect/persistent options from mpv.conf instead of replacing the list.
   const hasSeparateAudio = Boolean(audioUrl && !isMasterRelay);
-  // Allow all extensions for relayed HLS streams (local/proxied .m3u8) so ffmpeg never blocks audio playlists
-  // Applies to the main URL, relayed audio URL, and any paired external audio file.
   if (isRelayUrl || audioIsRelayUrl || hasSeparateAudio) {
-    const lavfOpts = "allowed_extensions=ALL";
-    const existingLavfIdx = args.findIndex(a => a.startsWith("--demuxer-lavf-o="));
-    if (existingLavfIdx >= 0) {
-      args[existingLavfIdx] += "," + lavfOpts;
-    } else {
-      args.push("--demuxer-lavf-o=" + lavfOpts);
-    }
+    args.push("--demuxer-lavf-o-append=allowed_extensions=ALL");
   }
   const profile = payload.profile || payload.mpvProfile;
   if (profile && /^[a-zA-Z0-9._-]+$/.test(profile)) {
@@ -268,35 +267,26 @@ function buildArgs(payload, subFiles, _mpvBin) {
   if (ytdlSupported(url)) {
     // Let yt-dlp resolve the page: cap resolution, pull English auto-captions, and
     // match sidecar subtitles loosely so YouTube opens fast with subs ready.
-    // Reliable format: bestvideo + bestaudio (no container restriction) + no-playlist,
-    // no-check-certificates, write-auto-subs, sub-langs=en.*
     args.push("--ytdl-format=" + resolveYtdlFormat(payload, cfg));
     args.push("--ytdl-raw-options=no-playlist=,no-check-certificates=,write-auto-subs=,sub-langs=en.*");
     args.push("--sub-auto=fuzzy");
   } else if (isDirectStream || isRelayUrl) {
     // Direct manifest/media URLs or relay URLs: skip yt-dlp entirely
     args.push("--ytdl=no");
-    // For direct streams with separate audio, use --external-file (more reliable than --audio-file for HLS)
-    // and --aid=1 to select the first audio track. Prefer the relayed audio URL when
-    // auth headers forced a local relay; otherwise pass the audio URL directly.
+    // Video-only stream + separate audio: mpv prefers external tracks during
+    // auto-selection, so --audio-file is picked without forcing --aid.
     if (hasSeparateAudio) {
-      const audioHeaders = payload.audioHeaders || {};
-      const needsRelay = audioHeaders.cookie || audioHeaders.referer || audioHeaders.origin || audioHeaders.userAgent;
+      const needsRelay = Object.keys(authHeaderObject(payload.audioHeaders)).length > 0;
       const externalAudio = (needsRelay && relayedAudioUrl) ? relayedAudioUrl : audioUrl;
-      args.push("--external-file=" + externalAudio);
-      args.push("--aid=1");
+      args.push("--audio-file=" + externalAudio);
     }
   }
   for (const f of subFiles) {
     if (isSafeLocalPath(f)) args.push("--sub-file=" + f);
   }
   if (subFiles.length > 0) args.push("--sid=1");
-  const start = Number(payload.startTime);
-  // Only pass --start if startTime > 3s, duration > 15s, and startTime < (duration - 10s)
-  const duration = Number(payload.duration);
-  if (Number.isFinite(start) && start > 3 && Number.isFinite(duration) && duration > 15 && start < (duration - 10)) {
-    args.push("--start=+" + String(start));
-  }
+  const start = resumeStart(payload.startTime, payload.duration);
+  if (start > 0) args.push("--start=+" + String(start));
   // Keep the media URL last so mpv parses it as the input, not as an option value.
   if (url) args.push(url);
   return args;
@@ -311,50 +301,146 @@ function ipcCandidates() {
   return [...new Set([primary, ...extra])];
 }
 
+function connectIpc(target) {
+  return process.platform === "win32" ? net.connect(target) : net.connect({ path: target });
+}
+
+let ipcRequestSeq = 0;
+
+// Send one JSON IPC command and resolve with its reply. mpv broadcasts events
+// to every client, so the reply is matched by request_id instead of taking
+// whatever line arrives first.
 function sendIpc(command, target, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const sock = process.platform === "win32"
-      ? net.connect(target)
-      : net.connect({ path: target });
-    const payload = JSON.stringify({ command }) + "\n";
+    const requestId = 1000 + (++ipcRequestSeq % 1000000);
+    const sock = connectIpc(target);
     let buf = "";
-    const timer = setTimeout(() => {
+    let settled = false;
+    const done = (err, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sock.end();
       sock.destroy();
-      reject(new Error("ipc timeout"));
-    }, timeoutMs || 500);
-    sock.on("connect", () => sock.write(payload));
+      if (err) reject(err);
+      else resolve(value);
+    };
+    const timer = setTimeout(() => done(new Error("ipc timeout")), timeoutMs || 500);
+    sock.on("connect", () => sock.write(JSON.stringify({ command, request_id: requestId }) + "\n"));
     sock.on("data", (d) => {
       buf += d.toString("utf8");
-      if (buf.includes("\n")) {
-        clearTimeout(timer);
-        sock.end();
-        try {
-          resolve(JSON.parse(buf.split("\n")[0]));
-        } catch (e) {
-          reject(e);
+      const lines = buf.split("\n");
+      buf = lines.pop() || "";
+      for (const line of lines) {
+        let message;
+        try { message = JSON.parse(line); } catch { continue; }
+        if (message && message.request_id === requestId) {
+          done(null, message);
+          return;
         }
       }
     });
-    sock.on("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
+    sock.on("error", (err) => done(err));
   });
 }
 
 async function sendScriptMessage(message, target, timeoutMs) {
-  return sendIpc(["script-message", message], target, timeoutMs || 80);
+  return sendIpc(["script-message", message], target, timeoutMs || 300);
 }
 
-async function killStaleMpv() {
-  if (process.platform !== "win32") return;
+function pidFilePath() {
+  return path.join(configDir(), "mpv.pid");
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
-    const { spawnSync } = require("child_process");
-    // Kill any enhanced-mpv.exe or mpv.exe processes owned by this user
-    spawnSync("taskkill", ["/F", "/IM", "enhanced-mpv.exe", "/T"], { windowsHide: true, timeout: 2000 });
-    spawnSync("taskkill", ["/F", "/IM", "mpv.exe", "/T"], { windowsHide: true, timeout: 2000 });
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return Boolean(err && err.code === "EPERM");
+  }
+}
+
+// Guard against PID reuse: only treat a recorded PID as ours when the process
+// image is still an mpv binary.
+function processLooksLikeMpv(pid) {
+  try {
+    if (process.platform === "linux") {
+      const cmd = fs.readFileSync("/proc/" + pid + "/cmdline", "utf8").split("\0")[0] || "";
+      return isNativeMpv(cmd);
+    }
+    if (process.platform === "win32") {
+      const r = spawnSync("tasklist", ["/FI", "PID eq " + pid, "/FO", "CSV", "/NH"], { encoding: "utf8", windowsHide: true, timeout: 2000 });
+      const name = ((r.stdout || "").match(/^"([^"]+)"/m) || [])[1] || "";
+      return isNativeMpv(name);
+    }
+    const r = spawnSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8", timeout: 2000 });
+    return isNativeMpv((r.stdout || "").trim());
   } catch {
-    // best effort
+    return false;
+  }
+}
+
+function readPidFile() {
+  try {
+    const pid = parseInt(fs.readFileSync(pidFilePath(), "utf8").trim(), 10);
+    return Number.isInteger(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function forceKill(pid) {
+  try {
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], { windowsHide: true, timeout: 3000 });
+    } else {
+      process.kill(pid, "SIGKILL");
+    }
+  } catch {
+    // already gone
+  }
+}
+
+async function waitForExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return !isProcessAlive(pid);
+}
+
+// Cleanly end the running Enhanced MPV instance before a fresh spawn: ask it
+// to quit over IPC, then force-kill only the exact process we launched (from
+// IPC `pid` or the pid file). Unrelated mpv windows are never touched.
+async function terminateMpv(target) {
+  const pids = new Set();
+  if (target) {
+    try {
+      const r = await sendIpc(["get_property", "pid"], target, 300);
+      if (r && r.error === "success" && Number.isInteger(r.data)) pids.add(r.data);
+    } catch {
+      // unresponsive IPC; fall back to the pid file
+    }
+    try {
+      await sendIpc(["quit"], target, 300);
+    } catch {
+      // ignore
+    }
+  }
+  const recorded = readPidFile();
+  if (recorded && processLooksLikeMpv(recorded)) pids.add(recorded);
+  for (const pid of pids) {
+    if (await waitForExit(pid, 1500)) continue;
+    appendLaunchLog("[" + new Date().toISOString() + "] mpv pid " + pid + " unresponsive; terminating");
+    forceKill(pid);
+    await waitForExit(pid, 1500);
+  }
+  try { fs.unlinkSync(pidFilePath()); } catch { /* none */ }
+  if (process.platform !== "win32") {
+    try { fs.unlinkSync(ipcPath()); } catch { /* none */ }
   }
 }
 
@@ -363,7 +449,7 @@ let liveIpc = null;
 async function ipcAlive() {
   const targets = ipcCandidates();
   const checks = targets.map(async (target) => {
-    const r = await sendIpc(["get_property", "mpv-version"], target, 150);
+    const r = await sendIpc(["get_property", "mpv-version"], target, 300);
     if (r && (r.error === "success" || r.data)) return { target, r };
     throw new Error("mpv IPC unavailable");
   });
@@ -382,8 +468,8 @@ async function ipcAlive() {
 
 function classifyError(stderr) {
   const s = String(stderr || "").toLowerCase();
-  if (s.includes("drm") || s.includes("widevine") || s.includes("403")) return "DRM";
-  if (s.includes("401") || s.includes("expired") || s.includes("403")) return "EXPIRED";
+  if (s.includes("drm") || s.includes("widevine")) return "DRM";
+  if (s.includes("401") || s.includes("403") || s.includes("expired")) return "EXPIRED";
   if (s.includes("unable to open") || s.includes("failed to recognize")) return "BAD_URL";
   return "LAUNCH_FAILED";
 }
@@ -432,6 +518,7 @@ function redactStderr(text) {
 
 function spawnMpv(mpvBin, args, spawnStartMs) {
   ensureDir(configDir());
+  const started = spawnStartMs || Date.now();
   const child = spawn(mpvBin, args, {
     detached: true,
     stdio: ["ignore", "ignore", "pipe"],
@@ -442,7 +529,10 @@ function spawnMpv(mpvBin, args, spawnStartMs) {
       HOME: os.homedir(),
     },
   });
-  const spawnMs = Date.now() - spawnStartMs;
+  if (child.pid) {
+    try { fs.writeFileSync(pidFilePath(), String(child.pid), "utf8"); } catch { /* best effort */ }
+  }
+  const spawnMs = Date.now() - started;
   appendLaunchLog("[" + new Date().toISOString() + "] spawn_ms=" + spawnMs + " " +
     JSON.stringify(publicCommand(mpvBin, args)));
   let stderrBuffer = "";
@@ -468,56 +558,83 @@ function spawnMpv(mpvBin, args, spawnStartMs) {
     }
     appendLaunchLog("[" + new Date().toISOString() + "] process exit code=" +
       String(code) + " signal=" + String(signal || ""));
+    if (readPidFile() === child.pid) {
+      try { fs.unlinkSync(pidFilePath()); } catch { /* none */ }
+    }
   });
   child.unref();
   return child;
 }
 
-async function loadFileIpc(url, mode, startTime, target) {
+// Per-file options that are safe to pass through `loadfile ... <options>` so a
+// reused window plays the new stream with its own headers, title, and yt-dlp
+// settings (they reset automatically when the file ends).
+const PER_FILE_OPTIONS = new Set([
+  "http-header-fields",
+  "force-media-title",
+  "ytdl",
+  "ytdl-format",
+  "ytdl-raw-options",
+  "sub-auto",
+]);
+
+function loadfilePlan(args) {
+  const options = {};
+  const audioFiles = [];
+  const subFiles = [];
+  let profile = null;
+  let lavfAppend = null;
+  for (const a of args.slice(0, -1)) {
+    const m = /^--([a-z0-9-]+)=(.*)$/is.exec(a);
+    if (!m) continue;
+    const [, key, value] = m;
+    if (PER_FILE_OPTIONS.has(key)) options[key] = value;
+    else if (key === "audio-file") audioFiles.push(value);
+    else if (key === "sub-file") subFiles.push(value);
+    else if (key === "profile") profile = value;
+    else if (key === "demuxer-lavf-o-append") lavfAppend = value;
+  }
+  return { options, audioFiles, subFiles, profile, lavfAppend };
+}
+
+// Replace (or append to) the playlist of a running mpv over IPC:
+//   loadfile <url> <mode> -1 { start, headers, ... }
+// then unpause (keep-open-pause leaves the old file paused at EOF), and, once
+// the new file is loaded, hot-attach the paired audio and local subtitles.
+// Rejects when mpv refuses the command (e.g. mpv < 0.38 without the index
+// argument) so the caller can fall back to a clean respawn.
+function loadFileIpc(url, mode, startTime, target, extra) {
+  const opts = extra || {};
+  const options = { ...(opts.options || {}) };
+  const start = resumeStart(startTime, opts.duration);
+  if (start > 0) options.start = String(start);
+  const followUps = [
+    ...(opts.audioFiles || []).map((f) => ["audio-add", f, "select"]),
+    ...(opts.subFiles || []).map((f) => ["sub-add", f, "select"]),
+  ];
+  const replacing = mode !== "append" && mode !== "append-play";
   return new Promise((resolve, reject) => {
-    const sock = process.platform === "win32" ? net.connect(target) : net.connect({ path: target });
-    const hasStart = Number.isFinite(startTime) && startTime > 0;
+    const sock = connectIpc(target);
     let input = "";
-    let loadAck = false;
-    let fileLoaded = false;
-    let seekSent = false;
-    let resultSent = false;
-    let timeout = setTimeout(() => {
-      if (loadAck) {
-        appendLaunchLog("[" + new Date().toISOString() + "] IPC file-loaded event timed out; stream remains open");
-        sock.end();
-        return;
-      }
-      sock.destroy();
-      if (!resultSent) {
-        resultSent = true;
-        reject(new Error("ipc loadfile timeout"));
-      }
-    }, 3000);
+    let acked = false;
+    let finished = false;
+    let nextId = 10;
     const finish = (err) => {
-      clearTimeout(timeout);
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
       sock.end();
-      if (!resultSent) {
-        resultSent = true;
-        if (err) reject(err);
-        else resolve(true);
-      } else if (err) {
-        appendLaunchLog("[" + new Date().toISOString() + "] IPC follow-up failed: " + String(err.message || err));
-      }
+      if (err && !acked) reject(err);
+      else resolve(true);
     };
-    const maybeSeek = () => {
-      if (!hasStart || !loadAck || !fileLoaded || seekSent) return;
-      seekSent = true;
-      sock.write(JSON.stringify({
-        command: ["seek", startTime, "absolute+exact"],
-        request_id: 2,
-      }) + "\n");
+    const send = (command) => {
+      try { sock.write(JSON.stringify({ command, request_id: nextId++ }) + "\n"); } catch { /* closed */ }
     };
+    // Wait for file-loaded only when there is follow-up work; cap the wait so
+    // the native host can still answer the browser promptly.
+    let timer = setTimeout(() => finish(new Error("ipc loadfile timeout")), 3000);
     sock.on("connect", () => {
-      sock.write(JSON.stringify({
-        command: ["loadfile", url, mode],
-        request_id: 1,
-      }) + "\n");
+      sock.write(JSON.stringify({ command: ["loadfile", url, mode, -1, options], request_id: 1 }) + "\n");
     });
     sock.on("data", (chunk) => {
       input += chunk.toString("utf8");
@@ -525,39 +642,28 @@ async function loadFileIpc(url, mode, startTime, target) {
       input = lines.pop() || "";
       for (const line of lines) {
         let message;
-        try {
-          message = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (message.event === "file-loaded") {
-          fileLoaded = true;
-          maybeSeek();
-        } else if (message.request_id === 1) {
+        try { message = JSON.parse(line); } catch { continue; }
+        if (message.request_id === 1) {
           if (message.error !== "success") {
             finish(new Error("ipc loadfile rejected: " + String(message.error)));
             return;
           }
-          loadAck = true;
-          if (!resultSent) {
-            resultSent = true;
-            resolve(true);
-          }
-          if (!hasStart) {
+          acked = true;
+          if (replacing) send(["set_property", "pause", false]);
+          if (!followUps.length) {
             finish();
-          } else {
-            clearTimeout(timeout);
-            timeout = setTimeout(() => {
-              if (!seekSent) {
-                appendLaunchLog("[" + new Date().toISOString() + "] IPC file-loaded event timed out; start seek skipped");
-                sock.end();
-              }
-            }, 5000);
-            maybeSeek();
+            return;
           }
-        } else if (message.request_id === 2) {
-          if (message.error !== "success") appendLaunchLog("[" + new Date().toISOString() + "] IPC seek failed: " + String(message.error));
-          finish();
+          clearTimeout(timer);
+          timer = setTimeout(() => {
+            appendLaunchLog("[" + new Date().toISOString() + "] IPC file-loaded wait timed out; follow-ups skipped");
+            finish();
+          }, 8000);
+        } else if (acked && message.event === "file-loaded") {
+          for (const cmd of followUps) send(cmd);
+          if (replacing) send(["set_property", "pause", false]);
+          // Give mpv a moment to read the queued commands before closing.
+          setTimeout(() => finish(), 150);
         }
       }
     });
@@ -565,24 +671,141 @@ async function loadFileIpc(url, mode, startTime, target) {
   });
 }
 
+async function replaceViaIpc(payload, args, target, wantQueue) {
+  const plan = loadfilePlan(args);
+  if (plan.profile) await sendIpc(["apply-profile", plan.profile], target, 500).catch(() => {});
+  if (plan.lavfAppend) {
+    await sendIpc(["change-list", "demuxer-lavf-o", "append", plan.lavfAppend], target, 500).catch(() => {});
+  }
+  await loadFileIpc(payload.url, wantQueue ? "append-play" : "replace", payload.startTime, target, {
+    duration: payload.duration,
+    options: plan.options,
+    audioFiles: plan.audioFiles,
+    subFiles: plan.subFiles,
+  });
+  if (wantQueue) return;
+  await Promise.allSettled([
+    sendIpc(["set_property", "force-window", "yes"], target, 300),
+    sendIpc(["set_property", "window-minimized", false], target, 300),
+    sendIpc(["set_property", "pause", false], target, 300),
+    sendScriptMessage("bring-to-front", target),
+  ]);
+}
+
+// Wait until mpv has a file loaded (optionally a specific path) before
+// attaching extra tracks; `audio-add`/`sub-add` fail while still loading.
+async function waitForLoadedFile(target, expectedPath, attempts) {
+  for (let i = 0; i < (attempts || 40); i++) {
+    try {
+      const idle = await sendIpc(["get_property", "idle-active"], target, 300);
+      if (idle && idle.error === "success" && idle.data === false) {
+        if (!expectedPath) return true;
+        const p = await sendIpc(["get_property", "path"], target, 300);
+        if (p && p.error === "success" && p.data === expectedPath) return true;
+      }
+    } catch {
+      // IPC may still be starting
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return false;
+}
+
 async function attachSubtitlesWhenReady(files, target) {
   if (!files.length) return;
-  // Fire-and-forget subtitle attachment - don't block stream launch
-  setImmediate(async () => {
-    for (let attempt = 0; attempt < 20; attempt++) {
-      try {
-        const state = await sendIpc(["get_property", "idle-active"], target, 300);
-        if (state && state.error === "success" && state.data === false) {
-          for (const file of files) await sendIpc(["sub-add", file, "select"], target);
-          return;
-        }
-      } catch {
-        // IPC may still be starting; retry briefly without delaying stream launch.
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+  if (!(await waitForLoadedFile(target, null, 20))) {
     appendLaunchLog("[" + new Date().toISOString() + "] subtitle attach skipped: mpv IPC did not become ready");
+    return;
+  }
+  for (const file of files) {
+    try { await sendIpc(["sub-add", file, "select"], target); } catch { /* skip */ }
+  }
+}
+
+function relayDaemonCommand() {
+  const isNode = /^node(?:\.exe)?$/i.test(path.basename(process.execPath));
+  return isNode
+    ? { bin: process.execPath, args: [path.join(__dirname, "index.js"), "--relay-daemon"] }
+    : { bin: process.execPath, args: ["--relay-daemon"] };
+}
+
+// Browsers terminate a one-shot native-messaging host right after it replies,
+// which would take an in-process relay (and mpv's stream) down with it. Run
+// the relay in a detached helper that exits on its own once mpv stops using
+// it; fall back to an in-process relay if the helper cannot start.
+function startRelayDaemon(request, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const { bin, args } = relayDaemonCommand();
+    let child;
+    try {
+      child = spawn(bin, args, { detached: true, stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    let out = "";
+    let settled = false;
+    const done = (err, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { child.stdin.end(); } catch { /* ignore */ }
+      try { child.stdout.destroy(); } catch { /* ignore */ }
+      child.unref();
+      if (err) {
+        try { child.kill(); } catch { /* ignore */ }
+        reject(err);
+      } else {
+        resolve(value);
+      }
+    };
+    const timer = setTimeout(() => done(new Error("relay daemon timeout")), timeoutMs || 5000);
+    child.on("error", (err) => done(err));
+    child.on("exit", () => done(new Error("relay daemon exited")));
+    child.stdout.on("data", (d) => {
+      out += d.toString("utf8");
+      const nl = out.indexOf("\n");
+      if (nl < 0) return;
+      try {
+        const reply = JSON.parse(out.slice(0, nl));
+        if (reply && reply.ok) done(null, reply);
+        else done(new Error((reply && reply.error) || "relay daemon failed"));
+      } catch (err) {
+        done(err);
+      }
+    });
+    child.stdin.write(JSON.stringify(request) + "\n");
   });
+}
+
+async function relaySingle(url, headers) {
+  try {
+    const reply = await startRelayDaemon({ kind: "single", url, headers });
+    return reply.relayUrl;
+  } catch (err) {
+    appendLaunchLog("[" + new Date().toISOString() + "] relay daemon unavailable, using in-process relay: " + String(err.message || err));
+    return startRelay(url, headers);
+  }
+}
+
+async function relayMaster(videoUrl, videoHeaders, audioUrl, audioHeaders) {
+  try {
+    const reply = await startRelayDaemon({ kind: "master", videoUrl, videoHeaders, audioUrl, audioHeaders });
+    return reply.masterRelayUrl;
+  } catch (err) {
+    appendLaunchLog("[" + new Date().toISOString() + "] relay daemon unavailable, using in-process relay: " + String(err.message || err));
+    const r = await startMasterRelay(videoUrl, videoHeaders, audioUrl, audioHeaders);
+    return r.masterRelayUrl;
+  }
+}
+
+function headerObject(fields) {
+  const out = {};
+  for (const h of fields) {
+    const idx = h.indexOf(":");
+    if (idx > 0) out[h.slice(0, idx).trim()] = h.slice(idx + 1).trim();
+  }
+  return out;
 }
 
 async function play(payload, mode) {
@@ -590,15 +813,12 @@ async function play(payload, mode) {
   if (!isSafeUrl(url) && !(url && isSafeLocalPath(url) && !String(url).includes("://"))) {
     return { ok: false, error: "Rejected URL", code: "BAD_URL", command: [] };
   }
-  // Use cached mpv binary - NO fs.existsSync, NO DNS, NO pipe probes on hot path
   const mpvBin = resolveMpvBin();
   if (!mpvBin) {
     return { ok: false, error: "mpv was not found on PATH", code: "MPV_NOT_FOUND", command: [] };
   }
   const cfg = readConfig();
-  const keepWarm = cfg.keepWarm === true;
-  const queuePref = mode || payload.action || cfg.queueMode || "replace";
-  const wantQueue = queuePref === "queue";
+  const wantQueue = (mode || payload.action || cfg.queueMode || "replace") === "queue";
   setTimeout(cleanStaleTempSubs, 0);
   const subtitleFilesPromise = materializeSubtitles(payload).catch((err) => {
     appendLaunchLog("[" + new Date().toISOString() + "] subtitle download failed: " +
@@ -609,165 +829,72 @@ async function play(payload, mode) {
     ? payload.subtitleFiles.filter(isSafeLocalPath)
     : [];
 
-  // Every new (non-queue) launch terminates any running enhanced-mpv instance,
-  // whether startTime is 0 or a resume point, so the previous video is never
-  // left paused on screen and the fresh spawn honors --start=+<seconds>.
-  const startResume = Number(payload.startTime);
-  const isReplace = (mode || payload.action || "replace") !== "queue";
-  appendLaunchLog("[" + new Date().toISOString() + "] play mode=" + (isReplace ? "replace" : "queue") +
-    " startTime=" + (Number.isFinite(startResume) ? startResume : 0) +
+  appendLaunchLog("[" + new Date().toISOString() + "] play mode=" + (wantQueue ? "queue" : "replace") +
+    " startTime=" + resumeStart(payload.startTime, payload.duration) +
     " duration=" + (Number.isFinite(Number(payload.duration)) ? Number(payload.duration) : 0) +
     " source=" + String(payload.startTimeSource || "none").slice(0, 200));
-  if (isReplace) {
-    await killStaleMpv();
-  }
 
-  // Handle audio relay for split HLS/DASH streams with auth headers
-  let masterRelayUrl = null;
-  const audioUrl = payload.audioUrl;
-  const audioHeaders = payload.audioHeaders || {};
-  const videoUrl = payload.url;
+  // Split HLS video + audio behind auth: relay both through localhost so every
+  // playlist, key, init segment, and media segment carries the tab's headers.
+  const audioUrl = payload.audioUrl && isSafeUrl(payload.audioUrl) ? payload.audioUrl : null;
+  const audioAuth = authHeaderObject(payload.audioHeaders);
   const videoHeaders = headerFields(payload);
-  const videoIsHls = /\.(m3u8)(?:$|[?#])/i.test(videoUrl);
-  const audioIsHls = audioUrl && /\.(m3u8)(?:$|[?#])/i.test(audioUrl);
-  const needsVideoRelay = videoIsHls && (videoHeaders.some(h => h.startsWith("Cookie:") || h.startsWith("Referer:") || h.startsWith("Origin:") || h.startsWith("User-Agent:")));
-  const needsAudioRelay = audioIsHls && (audioHeaders.cookie || audioHeaders.referer || audioHeaders.origin || audioHeaders.userAgent);
+  const videoIsHls = /\.m3u8(?:$|[?#])/i.test(url);
+  const audioIsHls = Boolean(audioUrl && /\.m3u8(?:$|[?#])/i.test(audioUrl));
+  const needsVideoRelay = videoIsHls && videoHeaders.some((h) => /^(Cookie|Referer|Origin|User-Agent):/i.test(h));
+  const needsAudioRelay = audioIsHls && Object.keys(audioAuth).length > 0;
+  const launchPayload = { ...payload, audioUrl };
 
-  // If both video and audio are HLS and need auth, use master relay with synthesized manifest
   if (videoIsHls && audioIsHls && (needsVideoRelay || needsAudioRelay)) {
     try {
-      const relayVideoHeaders = {};
-      const relayAudioHeaders = {};
-      // Add video headers
-      for (const h of videoHeaders) {
-        const idx = h.indexOf(":");
-        if (idx > 0) {
-          const key = h.slice(0, idx).trim();
-          const value = h.slice(idx + 1).trim();
-          relayVideoHeaders[key] = value;
-        }
-      }
-      // Add audio headers
-      if (audioHeaders.referer) relayAudioHeaders.Referer = audioHeaders.referer;
-      if (audioHeaders.origin) relayAudioHeaders.Origin = audioHeaders.origin;
-      if (audioHeaders.userAgent) relayAudioHeaders["User-Agent"] = audioHeaders.userAgent;
-      if (audioHeaders.cookie) relayAudioHeaders.Cookie = audioHeaders.cookie;
-
-      const masterResult = await startMasterRelay(videoUrl, relayVideoHeaders, audioUrl, relayAudioHeaders);
-      masterRelayUrl = masterResult.masterRelayUrl;
+      const masterRelayUrl = await relayMaster(url, headerObject(videoHeaders), audioUrl, audioAuth);
       appendLaunchLog("[" + new Date().toISOString() + "] started master relay: " + masterRelayUrl);
+      launchPayload.url = masterRelayUrl;
+      launchPayload.isMasterRelay = true;
     } catch (err) {
       appendLaunchLog("[" + new Date().toISOString() + "] master relay failed, falling back: " + String(err));
-      masterRelayUrl = null;
     }
   } else if (needsAudioRelay) {
-    // Legacy: only audio needs relay (non-HLS video or audio-only relay)
     try {
-      const relayHeaders = {};
-      if (audioHeaders.referer) relayHeaders.Referer = audioHeaders.referer;
-      if (audioHeaders.origin) relayHeaders.Origin = audioHeaders.origin;
-      if (audioHeaders.userAgent) relayHeaders["User-Agent"] = audioHeaders.userAgent;
-      if (audioHeaders.cookie) relayHeaders.Cookie = audioHeaders.cookie;
-      const relayedAudioUrl = await startRelay(audioUrl, relayHeaders);
-      appendLaunchLog("[" + new Date().toISOString() + "] started audio relay: " + relayedAudioUrl);
-      // Store relayed audio URL on payload for buildArgs
-      payload.relayedAudioUrl = relayedAudioUrl;
+      launchPayload.relayedAudioUrl = await relaySingle(audioUrl, audioAuth);
+      appendLaunchLog("[" + new Date().toISOString() + "] started audio relay: " + launchPayload.relayedAudioUrl);
     } catch (err) {
       appendLaunchLog("[" + new Date().toISOString() + "] audio relay failed, using direct: " + String(err));
-      payload.relayedAudioUrl = audioUrl;
+      launchPayload.relayedAudioUrl = audioUrl;
     }
   }
 
-  // If master relay was created, use it as the main URL and disable yt-dlp
-  if (masterRelayUrl) {
-    payload.url = masterRelayUrl;
-    payload.isMasterRelay = true;
-  }
-  const args = buildArgs(payload, localSubFiles, mpvBin);
+  const args = buildArgs(launchPayload, localSubFiles, mpvBin);
   const command = publicCommand(mpvBin, args);
-
-  // Warm reuse via loadfile cannot attach a separate --external-file audio track,
-  // so only reuse an idle mpv when audio is embedded (master relay) or absent.
-  const warmEligible = keepWarm && !(payload.audioUrl && !payload.isMasterRelay);
-
   ensureDir(configDir());
 
-  // Warm standby: if keepWarm is enabled and an idle mpv is already running,
-  // reuse it via IPC (loadfile + force-window=yes) for < 20 ms startup.
-  if (warmEligible && await ipcAlive()) {
+  // Single instance: a live window always takes the new video via IPC
+  // (loadfile replace + unpause + bring-to-front). If it does not answer
+  // correctly it is terminated so the fresh spawn never leaves the previous
+  // video frozen on screen.
+  if (await ipcAlive()) {
+    const target = liveIpc || ipcPath();
     try {
-      const t = liveIpc || ipcPath();
-      const start = Number(payload.startTime);
-      // Replace current playback or append to playlist
-      await loadFileIpc(payload.url, wantQueue ? "append-play" : "replace", start, t);
-      // Bring window to front and set title
-      sendScriptMessage("bring-to-front", t).catch(() => {});
-      sendIpc(["set_property", "force-window", "yes"], t).catch(() => {});
-      sendIpc(["set_property", "window-minimized", false], t).catch(() => {});
-      if (payload.title) {
-        sendIpc(["set_property", "force-media-title", sanitizeTitle(payload.title)], t).catch(() => {});
-      }
-      // Attach subtitles asynchronously
-      void subtitleFilesPromise.then((files) => attachSubtitlesWhenReady(files, t));
-      return { ok: true, error: null, code: "OK", command, queued: wantQueue, warm: true };
+      await replaceViaIpc(launchPayload, args, target, wantQueue);
+      appendLaunchLog("[" + new Date().toISOString() + "] IPC " + (wantQueue ? "append-play" : "replace") + " ok");
+      void subtitleFilesPromise.then((files) => attachSubtitlesWhenReady(files, target));
+      return { ok: true, error: null, code: "OK", command, queued: wantQueue, reused: true };
     } catch (err) {
-      appendLaunchLog("[" + new Date().toISOString() + "] warm ipc loadfile failed: " +
+      appendLaunchLog("[" + new Date().toISOString() + "] IPC replace failed, respawning: " +
         String((err && err.message) || err));
-      // Kill stale mpv and fall through to fresh spawn
-      await killStaleMpv();
+      await terminateMpv(target);
     }
-  }
-
-  // If keepWarm is enabled but no warm mpv is running, spawn one with --idle=once
-  // and --force-window=immediate so it opens a fresh, focused foreground window immediately.
-  if (warmEligible) {
-    const warmArgs = ["--idle=once", "--force-window=immediate", "--input-ipc-server=" + ipcPath()];
-    if (cfg.profile) warmArgs.push("--profile=" + cfg.profile);
-    const spawnStart = Date.now();
-    appendLaunchLog("[" + new Date().toISOString() + "] spawning warm mpv " +
-      JSON.stringify(publicCommand(mpvBin, warmArgs)));
-    spawnMpv(mpvBin, warmArgs, spawnStart);
-    // Wait briefly for the IPC socket to become available
-    for (let i = 0; i < 30; i++) {
-      await new Promise((r) => setTimeout(r, 30));
-      if (await ipcAlive()) break;
-    }
-    if (await ipcAlive()) {
-      try {
-        const t = liveIpc || ipcPath();
-        const start = Number(payload.startTime);
-        await loadFileIpc(payload.url, wantQueue ? "append-play" : "replace", start, t);
-        // Bring window to front and set title
-        sendScriptMessage("bring-to-front", t).catch(() => {});
-        sendIpc(["set_property", "force-window", "yes"], t).catch(() => {});
-        sendIpc(["set_property", "window-minimized", false], t).catch(() => {});
-        if (payload.title) {
-          sendIpc(["set_property", "force-media-title", sanitizeTitle(payload.title)], t).catch(() => {});
-        }
-        void subtitleFilesPromise.then((files) => attachSubtitlesWhenReady(files, t));
-        return { ok: true, error: null, code: "OK", command, queued: wantQueue, warm: true };
-      } catch (err) {
-        appendLaunchLog("[" + new Date().toISOString() + "] warm ipc loadfile failed: " +
-          String((err && err.message) || err));
-        // Kill stale mpv and fall through to regular spawn
-        await killStaleMpv();
-      }
-    }
+  } else {
+    // No IPC answer: any recorded instance is hung (or already gone).
+    await terminateMpv(null);
   }
 
   try {
-    const spawnStart = Date.now();
-    appendLaunchLog("[" + new Date().toISOString() + "] spawning " +
-      JSON.stringify(publicCommand(mpvBin, args)));
-    const child = spawnMpv(mpvBin, args, spawnStart);
-    void subtitleFilesPromise.then((files) => {
-      const target = ipcPath();
-      return attachSubtitlesWhenReady(files, target);
-    }).catch((err) => {
+    spawnMpv(mpvBin, args, Date.now());
+    void subtitleFilesPromise.then((files) => attachSubtitlesWhenReady(files, ipcPath())).catch((err) => {
       appendLaunchLog("[" + new Date().toISOString() + "] subtitle attach failed: " +
         String((err && err.message) || err));
     });
-    void child;
     return { ok: true, error: null, code: "OK", command, queued: false };
   } catch (err) {
     appendLaunchLog("[" + new Date().toISOString() + "] launch error: " +
@@ -781,10 +908,11 @@ async function play(payload, mode) {
   }
 }
 
-// Hot-attach a separately captured audio track to a running mpv window without
-// restarting playback: relay the audio through localhost when it carries auth
-// headers, then send `audio-add <url> select` over the live IPC socket.
-// Falls back to a fresh spawn with --external-file when no mpv is live.
+// Hot-attach a separately captured audio track to the running mpv window
+// without restarting playback. The attach runs in its own host process, so it
+// first waits until mpv is actually playing the video it belongs to; that way
+// a late attach never lands on the previous video. Falls back to a fresh
+// launch with --audio-file when no mpv is live.
 async function attachAudio(payload) {
   const audioUrl = payload && payload.audioUrl;
   if (!audioUrl || !isSafeUrl(audioUrl)) {
@@ -794,36 +922,36 @@ async function attachAudio(payload) {
   if (!mpvBin) {
     return { ok: false, error: "mpv was not found on PATH", code: "MPV_NOT_FOUND", command: [] };
   }
-  const audioHeaders = payload.audioHeaders || {};
-  const needsRelay = Boolean(
-    audioHeaders.cookie || audioHeaders.referer || audioHeaders.origin || audioHeaders.userAgent
-  );
-  let relayedAudioUrl = audioUrl;
-  if (needsRelay) {
-    try {
-      const relayHeaders = {};
-      if (audioHeaders.referer) relayHeaders.Referer = audioHeaders.referer;
-      if (audioHeaders.origin) relayHeaders.Origin = audioHeaders.origin;
-      if (audioHeaders.userAgent) relayHeaders["User-Agent"] = audioHeaders.userAgent;
-      if (audioHeaders.cookie) relayHeaders.Cookie = audioHeaders.cookie;
-      relayedAudioUrl = await startRelay(audioUrl, relayHeaders);
-      appendLaunchLog("[" + new Date().toISOString() + "] attachAudio relay: " + relayedAudioUrl);
-    } catch (err) {
-      appendLaunchLog("[" + new Date().toISOString() + "] attachAudio relay failed, using direct: " + String(err));
-      relayedAudioUrl = audioUrl;
-    }
-  }
+  const audioAuth = authHeaderObject(payload.audioHeaders);
   if (await ipcAlive()) {
     const target = liveIpc || ipcPath();
+    const videoUrl = payload.url && isSafeUrl(payload.url) ? payload.url : null;
+    if (!(await waitForLoadedFile(target, videoUrl, 50))) {
+      appendLaunchLog("[" + new Date().toISOString() + "] attachAudio skipped: target video is not playing");
+      return { ok: false, error: "target video is not playing", code: "NOT_PLAYING", command: [] };
+    }
+    let relayedAudioUrl = audioUrl;
+    if (Object.keys(audioAuth).length > 0) {
+      try {
+        relayedAudioUrl = await relaySingle(audioUrl, audioAuth);
+        appendLaunchLog("[" + new Date().toISOString() + "] attachAudio relay: " + relayedAudioUrl);
+      } catch (err) {
+        appendLaunchLog("[" + new Date().toISOString() + "] attachAudio relay failed, using direct: " + String(err));
+      }
+    }
     try {
-      await sendIpc(["audio-add", relayedAudioUrl, "select"], target, 1500);
-      appendLaunchLog("[" + new Date().toISOString() + "] IPC audio-add " + relayedAudioUrl);
+      await sendIpc(["change-list", "demuxer-lavf-o", "append", "allowed_extensions=ALL"], target, 500).catch(() => {});
+      const r = await sendIpc(["audio-add", relayedAudioUrl, "select"], target, 5000);
+      if (r && r.error && r.error !== "success") throw new Error(String(r.error));
+      appendLaunchLog("[" + new Date().toISOString() + "] IPC audio-add ok");
       return { ok: true, error: null, code: "OK", command: [] };
     } catch (err) {
       appendLaunchLog("[" + new Date().toISOString() + "] IPC audio-add failed: " + String((err && err.message) || err));
+      return { ok: false, error: "audio-add failed", code: "LAUNCH_FAILED", command: [] };
     }
   }
-  return play({ ...payload, audioUrl: relayedAudioUrl }, payload.action || "play");
+  if (!payload.url) return { ok: false, error: "no video to pair", code: "BAD_URL", command: [] };
+  return play(payload, "replace");
 }
 
 module.exports = {
@@ -831,18 +959,23 @@ module.exports = {
   findMpv: resolveMpvBin,
   buildArgs,
   isNativeMpv,
+  resumeStart,
   resolveYtdlFormat,
   cleanStaleTempSubs,
   launchLogPath,
   sendIpc,
   loadFileIpc,
+  loadfilePlan,
   ipcAlive,
   ipcPath,
-  liveIpc,
+  get liveIpc() { return liveIpc; },
   attachAudio,
   classifyError,
   publicCommand,
   redactStderr,
   sendScriptMessage,
-  killStaleMpv,
+  spawnMpv,
+  startRelay,
+  terminateMpv,
+  killStaleMpv: terminateMpv,
 };

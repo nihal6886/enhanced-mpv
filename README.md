@@ -4,8 +4,8 @@
 
 **Turn stock mpv into a VLC-class player with one-click playback from your browser.**
 
-[![Version](https://img.shields.io/badge/version-0.8.9%20beta-4ADE80?style=flat-square)](https://github.com/enhanced-mpv/enhanced-mpv/releases/latest)
-[![CI](https://img.shields.io/github/actions/workflow/status/enhanced-mpv/enhanced-mpv/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/enhanced-mpv/enhanced-mpv/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/version-0.8.9%20beta-4ADE80?style=flat-square)](https://github.com/nihal6886/enhanced-mpv/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/nihal6886/enhanced-mpv/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/nihal6886/enhanced-mpv/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat-square)
 ![Browsers](https://img.shields.io/badge/browsers-Chrome%20%7C%20Brave%20%7C%20Edge%20%7C%20Firefox-orange?style=flat-square)
@@ -48,7 +48,7 @@ Setup takes two steps: run the installer, then load the extension.
 
 ```powershell
 # One-liner (zero SmartScreen, runs in memory)
-irm https://raw.githubusercontent.com/enhanced-mpv/enhanced-mpv/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/nihal6886/enhanced-mpv/main/scripts/install.ps1 | iex
 ```
 
 **Linux and macOS**
@@ -94,8 +94,8 @@ Done. Open any video page and click the extension icon.
 
 ### Recent fixes in v0.8.9
 
-- **YouTube instant-EOF (-0:00 black screen) and low-resolution bug resolved.** The broken `android_vr` player client is removed, and yt-dlp now negotiates valid 1080p and 4K adaptive streams with `bestvideo[height<=2160][vcodec!*=av01]+bestaudio/best`. See [`mpv.conf`](https://github.com/enhanced-mpv/enhanced-mpv/blob/main/mpv-config/mpv.conf) and [`mpv-launcher.js`](https://github.com/enhanced-mpv/enhanced-mpv/blob/main/native-host/mpv-launcher.js).
-- **Edge Stream Selection and Resource-Gating Engine** introduced, with deterministic multi-feature scoring and split-audio pairing for HLS. See [`background.js`](https://github.com/enhanced-mpv/enhanced-mpv/blob/main/browser-extension/background.js) and [`stream-scoring.js`](https://github.com/enhanced-mpv/enhanced-mpv/blob/main/native-host/stream-scoring.js).
+- **YouTube instant-EOF (-0:00 black screen) and low-resolution bug resolved.** The broken `android_vr` player client is removed, and yt-dlp now negotiates valid 1080p and 4K adaptive streams with `bestvideo[height<=2160][vcodec!*=av01]+bestaudio/best`. See [`mpv.conf`](https://github.com/nihal6886/enhanced-mpv/blob/main/mpv-config/mpv.conf) and [`mpv-launcher.js`](https://github.com/nihal6886/enhanced-mpv/blob/main/native-host/mpv-launcher.js).
+- **Edge Stream Selection and Resource-Gating Engine** introduced, with deterministic multi-feature scoring and split-audio pairing for HLS. See [`background.js`](https://github.com/nihal6886/enhanced-mpv/blob/main/browser-extension/background.js) and [`stream-scoring.js`](https://github.com/nihal6886/enhanced-mpv/blob/main/native-host/stream-scoring.js).
 
 ## Architecture
 
@@ -222,11 +222,11 @@ A deterministic pipeline replaces ad-hoc URL sorting with a fast, bounded scorin
 
 **Audio pairing for split HLS and DASH**
 
-When a video-only sub-playlist is selected, the engine pairs it with the highest-bitrate audio-only sub-playlist on the same tab. If the audio stream is protected by cookies or headers, the native host starts an authenticated **localhost HLS relay** ([`stream-relay.js`](https://github.com/enhanced-mpv/enhanced-mpv/blob/main/native-host/stream-relay.js)) and passes `--audio-file=<relayedAudioUrl>` to mpv for lockstep A/V playback.
+When a video-only sub-playlist is selected, the engine pairs it with the highest-bitrate audio-only sub-playlist on the same tab. If the audio stream is protected by cookies or headers, the native host starts an authenticated **localhost HLS relay** ([`stream-relay.js`](https://github.com/nihal6886/enhanced-mpv/blob/main/native-host/stream-relay.js)) and passes `--audio-file=<relayedAudioUrl>` to mpv for lockstep A/V playback.
 
 **Per-request header preservation**
 
-The extension captures the exact inner iframe `Referer`, `Origin`, `Cookie`, and `User-Agent` headers through `webRequest.onBeforeSendHeaders` with `extraHeaders`, using `details.initiator` and `documentUrl` as fallbacks. Iframe embeds keep their own headers and are never overwritten by the parent tab URL. See [`background.js:368-396`](https://github.com/enhanced-mpv/enhanced-mpv/blob/main/browser-extension/background.js#L368-L396).
+The extension captures the exact inner iframe `Referer`, `Origin`, `Cookie`, and `User-Agent` headers through `webRequest.onBeforeSendHeaders` with `extraHeaders`, using `details.initiator` and `documentUrl` as fallbacks. Iframe embeds keep their own headers and are never overwritten by the parent tab URL. See [`background.js:368-396`](https://github.com/nihal6886/enhanced-mpv/blob/main/browser-extension/background.js#L368-L396).
 
 </details>
 
@@ -309,14 +309,14 @@ The extension **Settings** page reads and writes this file through the native ho
 
 Both options register the native host, deploy the mpv config, and link the browser extension automatically.
 
-1. **Smart Web Installer.** Download `EnhancedMPV-Setup.exe` from the [latest release](https://github.com/enhanced-mpv/enhanced-mpv/releases/latest) and run it.
+1. **Smart Web Installer.** Download `EnhancedMPV-Setup.exe` from the [latest release](https://github.com/nihal6886/enhanced-mpv/releases/latest) and run it.
 2. **Zero-SmartScreen one-liner** (see [Quick Start](#quick-start)). A plain PowerShell script is fetched and executed in memory. Nothing is written to disk as a `.exe`, so SmartScreen has nothing to block.
 
 To link an unpacked build's own extension ID:
 
 ```powershell
 $env:ENHANCED_MPV_EXTENSION_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-irm https://raw.githubusercontent.com/enhanced-mpv/enhanced-mpv/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/nihal6886/enhanced-mpv/main/scripts/install.ps1 | iex
 ```
 
 ### Verify downloads
@@ -324,7 +324,7 @@ irm https://raw.githubusercontent.com/enhanced-mpv/enhanced-mpv/main/scripts/ins
 Every release ships a `SHA256SUMS.txt` next to the binaries. Check the `.exe` before running it:
 
 ```powershell
-irm https://github.com/enhanced-mpv/enhanced-mpv/releases/latest/download/SHA256SUMS.txt
+irm https://github.com/nihal6886/enhanced-mpv/releases/latest/download/SHA256SUMS.txt
 Get-FileHash .\EnhancedMPV-Setup.exe -Algorithm SHA256   # compare with the matching line
 ```
 

@@ -52,13 +52,13 @@ describe("native mpv stream launch arguments", () => {
     }, [subtitle], "C:\\Program Files\\mpv\\mpv.exe");
 
     assert.equal(args.at(-1), url);
-    assert.ok(args.includes("--start=+42.5"));
+    assert.ok(args.includes("--start=+42"), "resume start is floored to whole seconds");
     assert.ok(args.includes("--sub-file=" + subtitle));
     assert.ok(args.some((arg) => arg.startsWith("--http-header-fields=")));
     assert.ok(args.find((arg) => arg.startsWith("--http-header-fields=")).includes("Cookie: session=secret; locale=en"));
   });
 
-  it("uses valid Header: Value\\r\\n syntax for --demuxer-lavf-o on direct .m3u8 streams", () => {
+  it("never duplicates headers into --demuxer-lavf-o (mpv forwards --http-header-fields to lavf)", () => {
     const url = "https://cdn.example.test/stream.m3u8";
     const args = buildArgs({
       url,
@@ -67,16 +67,12 @@ describe("native mpv stream launch arguments", () => {
       cookies: "session=abc123",
     }, [], "C:\\Program Files\\mpv\\mpv.exe");
 
-    const lavfArg = args.find((arg) => arg.startsWith("--demuxer-lavf-o=headers="));
-    assert.ok(lavfArg, "--demuxer-lavf-o=headers= should be present for direct .m3u8 streams");
-    // Should use Header: Value\r\n format, not Header=Value|Header=Value
-    assert.ok(lavfArg.includes("User-Agent: Enhanced MPV/1.0\\r\\n"), "User-Agent should use Header: Value format with \\r\\n");
-    assert.ok(lavfArg.includes("Referer: https://provider.example.test/\\r\\n"), "Referer should use Header: Value format with \\r\\n");
-    assert.ok(lavfArg.includes("Cookie: session=abc123\\r\\n"), "Cookie should use Header: Value format with \\r\\n");
-    // Should end with \r\n
-    assert.ok(lavfArg.endsWith("\\r\\n"), "Headers should end with \\r\\n");
-    // Should NOT contain the old malformed format
-    assert.ok(!lavfArg.includes("User-Agent=Enhanced MPV/1.0|"), "Should not use old Header=Value| format");
+    assert.equal(args.find((arg) => /^--demuxer-lavf-o(?:-append)?=headers=/.test(arg)), undefined);
+    assert.equal(args.find((arg) => arg.startsWith("--demuxer-lavf-o=")), undefined,
+      "the mpv.conf demuxer-lavf-o list must not be replaced");
+    const hdr = args.find((arg) => arg.startsWith("--http-header-fields="));
+    assert.ok(hdr.includes("User-Agent: Enhanced MPV/1.0"));
+    assert.ok(hdr.includes("Cookie: session=abc123"));
   });
 
   it("omits --demuxer-lavf-o for YouTube page URLs (yt-dlp manages its own headers)", () => {
@@ -152,18 +148,17 @@ describe("command redaction for logging", () => {
 });
 
 describe("paired external audio for video-only streams", () => {
-  it("passes --external-file, --aid=1, and allowed_extensions=ALL for a direct audio URL", () => {
+  it("passes --audio-file and appends allowed_extensions=ALL for a direct audio URL", () => {
     const args = buildArgs({
       url: "https://cdn.example.test/video/index.m3u8",
       audioUrl: "https://cdn.example.test/audio/index.m3u8",
       userAgent: "Enhanced MPV/1.0",
     }, [], "C:\\Program Files\\mpv\\mpv.exe");
 
-    assert.ok(args.includes("--external-file=https://cdn.example.test/audio/index.m3u8"));
-    assert.ok(args.includes("--aid=1"));
-    const lavf = args.find((arg) => arg.startsWith("--demuxer-lavf-o="));
-    assert.ok(lavf && lavf.includes("allowed_extensions=ALL"),
-      "allowed_extensions=ALL should be present when a separate audio file is paired");
+    assert.ok(args.includes("--audio-file=https://cdn.example.test/audio/index.m3u8"));
+    assert.ok(!args.includes("--aid=1"), "mpv auto-selects the external audio track");
+    assert.ok(args.includes("--demuxer-lavf-o-append=allowed_extensions=ALL"),
+      "allowed_extensions=ALL should be appended when a separate audio file is paired");
   });
 
   it("prefers the relayed audio URL when auth headers force a local relay", () => {
@@ -176,18 +171,56 @@ describe("paired external audio for video-only streams", () => {
       cookies: "session=abc",
     }, [], "C:\\Program Files\\mpv\\mpv.exe");
 
-    assert.ok(args.includes("--external-file=http://127.0.0.1:8765/ab12cd34/index.m3u8"));
-    assert.ok(args.includes("--aid=1"));
+    assert.ok(args.includes("--audio-file=http://127.0.0.1:8765/ab12cd34/index.m3u8"));
   });
 
-  it("omits --external-file and --aid=1 when a master relay already embeds audio", () => {
+  it("omits --audio-file when a master relay already embeds audio", () => {
     const args = buildArgs({
       url: "http://127.0.0.1:8765/ab12cd34/master.m3u8",
       isMasterRelay: true,
       audioUrl: "https://cdn.example.test/audio/index.m3u8",
     }, [], "C:\\Program Files\\mpv\\mpv.exe");
 
-    assert.equal(args.find((arg) => arg.startsWith("--external-file=")), undefined);
-    assert.ok(!args.includes("--aid=1"));
+    assert.equal(args.find((arg) => arg.startsWith("--audio-file=")), undefined);
+  });
+});
+
+describe("resume bounds and single-instance IPC replacement", () => {
+  const { resumeStart, loadfilePlan } = require("../mpv-launcher");
+
+  it("only resumes when start > 3, duration > 15, and start < duration - 10", () => {
+    assert.equal(resumeStart(42.9, 300), 42);
+    assert.equal(resumeStart(3, 300), 0);
+    assert.equal(resumeStart(30, 15), 0);
+    assert.equal(resumeStart(295, 300), 0);
+    assert.equal(resumeStart(60, 0), 0);
+    assert.equal(resumeStart(60, Infinity), 0);
+    assert.equal(resumeStart(NaN, 300), 0);
+  });
+
+  it("omits --start for out-of-bounds resume points", () => {
+    const args = buildArgs({ url: "https://cdn.example.test/a.mp4", startTime: 2, duration: 300 }, [], "mpv");
+    assert.equal(args.find((a) => a.startsWith("--start=")), undefined);
+  });
+
+  it("accepts the branded enhanced-mpv binary", () => {
+    assert.equal(isNativeMpv("C:\\Users\\me\\AppData\\Local\\Programs\\EnhancedMPV\\enhanced-mpv.exe"), true);
+    assert.equal(isNativeMpv("/usr/bin/mpv"), true);
+  });
+
+  it("maps launch args to per-file loadfile options and hot-attach follow-ups", () => {
+    const args = buildArgs({
+      url: "https://cdn.example.test/video/index.m3u8",
+      audioUrl: "https://cdn.example.test/audio/index.m3u8",
+      title: "Clip",
+      referer: "https://site.example.test/",
+    }, [], "mpv");
+    const plan = loadfilePlan(args);
+    assert.equal(plan.options["force-media-title"], "Clip");
+    assert.equal(plan.options.ytdl, "no");
+    assert.ok(plan.options["http-header-fields"].includes("Referer: https://site.example.test/"));
+    assert.deepEqual(plan.audioFiles, ["https://cdn.example.test/audio/index.m3u8"]);
+    assert.equal(plan.lavfAppend, "allowed_extensions=ALL");
+    assert.equal(plan.options["input-ipc-server"], undefined);
   });
 });

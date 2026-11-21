@@ -42,6 +42,13 @@ function isYtdlPage(url) {
   }
 }
 
+// Score tiers: canonical yt-dlp pages > verified/candidate HLS master
+// playlists > deterministic proxy video sub-playlists > everything else. The
+// gaps exceed every per-stream bonus so a tier can never be overtaken.
+const SCORE_YTDLP = 9000;
+const SCORE_HLS_MASTER = 5000;
+const SCORE_PROXY_VIDEO = 2800;
+
 const PAGE_STREAM_LABEL = "Page Stream via yt-dlp (Best Video + Audio + Captions)";
 
 const tabState = new Map();
@@ -429,7 +436,7 @@ function promoteToMaster(tabId, videoUrl, masterUrl, text, headers) {
       relayReady: true,
       manifestInfo,
       audioUrl: null,
-      score: Math.max(state.videos[idx].score || 0, 3500),
+      score: Math.max(state.videos[idx].score || 0, SCORE_HLS_MASTER),
     headers: { ...(state.videos[idx].headers || {}), ...(headers || {}) },
   };
   state.videos.sort((a, b) => b.score - a.score);
@@ -548,7 +555,7 @@ function scoreStreamCandidate(url, headers, tabId, allVideos = [], audioStreams 
   if (/\.ts(?:$|[?#])/i.test(url) && !/\.m3u8/i.test(url)) return { score: -Infinity, kind: "segment", audioUrl: null, manifestInfo: null, frameId: null };
 
   if (isYtdlPage(url)) {
-    return { score: 2000, kind: "ytdlp", audioUrl: null, manifestInfo: null, frameId: null };
+    return { score: SCORE_YTDLP, kind: "ytdlp", audioUrl: null, manifestInfo: null, frameId: null };
   }
 
   // Audio-only FIRST (before master): proxy audio ".../m3u8_proxy/audio/.../index.m3u8"
@@ -560,16 +567,16 @@ function scoreStreamCandidate(url, headers, tabId, allVideos = [], audioStreams 
   // Deterministic proxy video (.../m3u8_proxy/video/...): keep it the primary
   // video stream (never replace it with a short stub) and pair the sibling audio.
   if (PROXY_VIDEO_RE.test(u)) {
-    const r = scoreVideoOnly(url, u, frameId, allVideos, audioStreams, 2800);
+    const r = scoreVideoOnly(url, u, frameId, allVideos, audioStreams, SCORE_PROXY_VIDEO);
     return { score: r.score, kind: r.kind, audioUrl: r.audioUrl, manifestInfo: null, frameId: frameId };
   }
 
-  // STRICT MASTER-MANIFEST PRIORITY: +3500 base score for master manifests so a
-  // verified master manifest always outranks a proxy-video entry (2800 base).
-  // Never select video-only sub-playlist over master manifest
+  // STRICT MASTER-MANIFEST PRIORITY: the master tier base is above the
+  // highest possible proxy-video score (base + resolution + CDN + bandwidth +
+  // audio pairing), so a sub-playlist never outranks its master.
   if (isMasterManifestUrl(u) || isRootManifestCandidate(url)) {
     kind = "hls-master";
-    score += 3500; // hls-master base (3500) must stay above proxy-video (2800)
+    score += SCORE_HLS_MASTER;
 
     if (/(2160|4k|uhd)/i.test(u)) score += 400;
     else if (/(1440|2k|qhd)/i.test(u)) score += 300;
@@ -951,12 +958,18 @@ chrome.webRequest.onHeadersReceived.addListener(
                 ...state.videos[videoIdx],
                 // Keep the master URL as the entry (mpv picks variants itself).
                 url: isMaster ? state.videos[videoIdx].url : result.url,
-                ...(isMaster ? { kind: "hls-master", isVerifiedMaster: true } : {}),
+                ...(isMaster ? {
+                  kind: "hls-master",
+                  isVerifiedMaster: true,
+                  audioUrl: null,
+                  score: Math.max(state.videos[videoIdx].score || 0, SCORE_HLS_MASTER),
+                } : {}),
                 verified: true,
                 relayReady: true,
                 manifestInfo: result.manifestInfo,
                 headers: { ...state.videos[videoIdx].headers, ...result.headers },
               };
+              state.videos.sort((a, b) => b.score - a.score);
               persist(details.tabId);
             }
           }
@@ -1089,7 +1102,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === "pauseAndHandoff") {
       const tabs = sender.tab ? [sender.tab] : await chrome.tabs.query({ active: true, currentWindow: true });
       const tab = tabs[0];
-      const out = await launch(tab, msg.url, "play");
+      const out = await launch(tab, msg.url, "play", msg);
       sendResponse(out);
       return;
     }
@@ -1101,6 +1114,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   })();
   return true;
 });
+
+// Resume only from a real mid-playback position: > 3 s in, a finite duration
+// over 15 s, and at least 10 s before the end. Returns whole seconds or 0.
+function resumeStartTime(startTime, duration) {
+  const s = Number(startTime);
+  const d = Number(duration);
+  if (!Number.isFinite(s) || !Number.isFinite(d)) return 0;
+  if (s > 3 && d > 15 && s < d - 10) return Math.floor(s);
+  return 0;
+}
 
 function pickUrl(info, tab) {
   return (info && (info.srcUrl || info.linkUrl || info.selectionText))
@@ -1134,17 +1157,14 @@ async function buildPayload(tab, url, extra) {
 
   const requestHeaders = selectedVideo?.headers || {};
   const headers = { ...requestHeaders };
-  let startTime = selectedVideo?.currentTime || 0;
-  let duration = selectedVideo?.duration || 0;
-  // The popup recovers playback position from every frame (iframe players) and
-  // passes it through. Only honour a resume point that is > 3s and at least
-  // 10s before the end, matching mpv's --start clamp.
-  if (extra && Number.isFinite(Number(extra.startTime))) {
-    const s = Number(extra.startTime);
-    if (Number.isFinite(Number(extra.duration))) duration = Number(extra.duration);
-    const d = Number.isFinite(duration) && duration > 0 ? duration : 0;
-    startTime = (s > 3 && (d <= 0 || s < d - 10)) ? s : 0;
-  }
+  // The popup recovers playback position from every frame (iframe / Shadow
+  // DOM players) and passes it through; otherwise fall back to the position
+  // content.js last reported for this stream.
+  const hasExtraStart = extra && extra.startTime != null && Number.isFinite(Number(extra.startTime));
+  const rawStart = hasExtraStart ? Number(extra.startTime) : Number(selectedVideo?.currentTime);
+  const rawDuration = hasExtraStart ? Number(extra.duration) : Number(selectedVideo?.duration);
+  const startTime = resumeStartTime(rawStart, rawDuration);
+  const duration = Number.isFinite(rawDuration) ? rawDuration : 0;
   
   // Include manifestInfo for verified master manifests
   const manifestInfo = selectedVideo?.manifestInfo || null;
@@ -1159,8 +1179,15 @@ async function buildPayload(tab, url, extra) {
   let audioUrl = selectedVideo?.audioUrl || null;
   let audioHeaders = null;
   
-  // If no audioUrl from pairing and not a verified master with audio, find best audio stream
-  if (!audioUrl && !(isVerifiedMaster && masterHasAudio)) {
+  // Only a split video-only HLS sub-playlist needs an external audio track.
+  // Masters (muxed or with #EXT-X-MEDIA audio), yt-dlp pages, DASH, and
+  // progressive files already carry audio and must never get a stray track.
+  const needsSeparateAudio = Boolean(selectedVideo) &&
+    selectedVideo.kind !== "hls-master" && !(isVerifiedMaster && masterHasAudio) &&
+    (selectedVideo.kind === "hls-video-only" || isVideoOnlyVideo(selectedVideo));
+  if (!needsSeparateAudio) {
+    audioUrl = null;
+  } else if (!audioUrl) {
     // Prefer audioStreams (explicitly captured audio playlists), then fallback to hls-audio-only from videos
     const audioPool = [
       ...(state.audioStreams || []),
@@ -1287,17 +1314,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   audioRecoveryInFlight.forEach((_, key) => {
     if (key.startsWith(tabId + "|")) audioRecoveryInFlight.delete(key);
   });
-});
-
-chrome.tabs.onUpdated.addListener((tabId, change) => {
-  if (change.status === "loading" && change.url) {
-    tabState.set(tabId, emptyState());
-    persist(tabId);
-  }
-  if (change.title) {
-    const s = getState(tabId);
-    s.page.title = change.title;
-  }
 });
 
 chrome.tabs.onUpdated.addListener((tabId, change) => {

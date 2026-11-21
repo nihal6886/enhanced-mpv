@@ -12,7 +12,7 @@ param(
   [switch]$WithFfmpeg,
   [switch]$Yes,
   [switch]$Force,
-  [string]$Repo = $(if ($env:ENHANCED_MPV_REPO) { $env:ENHANCED_MPV_REPO } else { "enhanced-mpv/enhanced-mpv" }),
+  [string]$Repo = $(if ($env:ENHANCED_MPV_REPO) { $env:ENHANCED_MPV_REPO } else { "nihal6886/enhanced-mpv" }),
   [string]$Branch = $(if ($env:ENHANCED_MPV_BRANCH) { $env:ENHANCED_MPV_BRANCH } else { "main" })
 )
 
@@ -345,10 +345,8 @@ function Unregister-NativeHost {
 
 if ($Uninstall) {
   Unregister-NativeHost
-  $copied = @(
-    (Join-Path $MpvDir "scripts\smart-sub-manager.lua"),
-    (Join-Path $MpvDir "scripts\enhanced-mpv.lua")
-  )
+  $copied = @("window-icon.lua", "enhanced-mpv.lua", "smart-sub-manager.lua", "loading-screen.lua", "player-menus.lua") |
+    ForEach-Object { Join-Path $MpvDir "scripts\$_" }
   foreach ($f in $copied) { if (Test-Path $f) { Remove-Item $f -Force } }
   $latest = Get-ChildItem $BackupDir -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
   if ($latest) {
