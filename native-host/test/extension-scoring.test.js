@@ -141,3 +141,36 @@ describe("extension addVideo: audio storage and badge count", () => {
     assert.equal(bg.__getBadgeText(), "1", "badge should count only the video, not the audio");
   });
 });
+describe("extension stream scoring: root-level candidate master manifests", () => {
+  const ROOT = "https://hls.shegu.net/40097260.m3u8";
+
+  it("scores a root-level /<id>.m3u8 as a 3500-base hls-master candidate", () => {
+    const r = bg.scoreStreamCandidate(ROOT, {}, 1, [], [], null);
+    assert.equal(r.kind, "hls-master");
+    assert.ok(r.score >= 3500);
+  });
+
+  it("ranks the root manifest #1 above proxy video immediately on interception", () => {
+    const tabId = 4242;
+    bg.addVideo(tabId, AUDIO_PROXY, {});
+    bg.addVideo(tabId, VIDEO_PROXY, {});
+    bg.addVideo(tabId, ROOT, {});
+    assert.equal(bg.getState(tabId).videos[0].url, ROOT);
+  });
+
+  it("does not treat nested /video/ or /audio/ playlists as root candidates", () => {
+    assert.equal(bg.isRootManifestCandidate("https://cdn.example.com/video/123.m3u8"), false);
+    assert.equal(bg.isRootManifestCandidate("https://cdn.example.com/a/b/123.m3u8"), false);
+    assert.equal(bg.isRootManifestCandidate(ROOT), true);
+  });
+
+  it("demotes a root candidate whose body is a media playlist", () => {
+    const tabId = 4343;
+    bg.addVideo(tabId, VIDEO_PROXY, {});
+    bg.addVideo(tabId, ROOT, {});
+    assert.equal(bg.demoteRootManifestCandidate(tabId, ROOT), true);
+    const entry = bg.getState(tabId).videos.find((v) => v.url === ROOT);
+    assert.equal(entry.kind, "hls-video-only");
+    assert.equal(bg.getState(tabId).videos[0].url, VIDEO_PROXY);
+  });
+});

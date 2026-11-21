@@ -609,13 +609,16 @@ async function play(payload, mode) {
     ? payload.subtitleFiles.filter(isSafeLocalPath)
     : [];
 
-  // Force exact timestamp resume: when launching (not queueing) at a non-zero
-  // start time, terminate any running enhanced-mpv instance so the fresh spawn
-  // below honors --start=+<seconds> instead of leaving the previous video
-  // paused. buildArgs applies --start=+<seconds> to the fresh-spawn args.
+  // Every new (non-queue) launch terminates any running enhanced-mpv instance,
+  // whether startTime is 0 or a resume point, so the previous video is never
+  // left paused on screen and the fresh spawn honors --start=+<seconds>.
   const startResume = Number(payload.startTime);
   const isReplace = (mode || payload.action || "replace") !== "queue";
-  if (isReplace && Number.isFinite(startResume) && startResume > 3) {
+  appendLaunchLog("[" + new Date().toISOString() + "] play mode=" + (isReplace ? "replace" : "queue") +
+    " startTime=" + (Number.isFinite(startResume) ? startResume : 0) +
+    " duration=" + (Number.isFinite(Number(payload.duration)) ? Number(payload.duration) : 0) +
+    " source=" + String(payload.startTimeSource || "none").slice(0, 200));
+  if (isReplace) {
     await killStaleMpv();
   }
 

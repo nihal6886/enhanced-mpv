@@ -188,40 +188,27 @@ async function pauseBrowserVideos(tabId) {
   }
 }
 
-// Injected into every frame: report each visible <video> with a usable duration
-// so the popup can recover playback position from the main active player in any
-// frame (including cross-origin iframes). Candidates are ranked by visible
-// viewport area and readyState >= 2; hidden 0x0 elements, hover previews, and
-// .ad-showing players are ignored.
+// Injected into every frame (allFrames: true): report every <video> with its
+// currentTime/duration/area/readyState so the popup can recover the playback
+// position from iframe players (febbox.com / ShowBox) where the top frame has
+// no video and reports 0.
 function collectPlaybackFrame() {
-  const videos = [];
+  let videos = [];
   try {
-    const nodes = document.querySelectorAll("video");
-    for (let i = 0; i < nodes.length; i++) {
-      const el = nodes[i];
-      // Skip hidden/zero-size players, hover thumbnails, and ad players.
-      if (el.offsetWidth === 0 || el.offsetHeight === 0) continue;
-      if (el.closest(".ad-showing, .ad-interrupting")) continue;
-      if (el.ended === true) continue;
-      // Only consider videos ready enough to report a meaningful timestamp.
-      if (el.readyState < 2) continue;
+    videos = Array.from(document.querySelectorAll("video")).map((v, index) => {
+      const rect = v.getBoundingClientRect();
       let src = "";
-      try { src = el.currentSrc || el.src || ""; } catch { src = ""; }
-      if (!src) continue;
-      const duration = Number(el.duration) || 0;
-      if (!Number.isFinite(duration) || duration <= 0) continue;
-      const rect = el.getBoundingClientRect();
-      const area = Math.max(0, rect.width || 0) * Math.max(0, rect.height || 0);
-      videos.push({
-        index: i,
+      try { src = v.currentSrc || v.src || ""; } catch { src = ""; }
+      return {
+        index,
         src,
-        duration,
-        currentTime: Number(el.currentTime) || 0,
-        paused: Boolean(el.paused),
-        readyState: Number(el.readyState) || 0,
-        area,
-      });
-    }
+        currentTime: Number(v.currentTime) || 0,
+        duration: Number(v.duration) || 0,
+        area: Math.max(0, rect.width || 0) * Math.max(0, rect.height || 0),
+        readyState: Number(v.readyState) || 0,
+        paused: Boolean(v.paused),
+      };
+    });
   } catch {
     // ignore inaccessible frames
   }
@@ -270,37 +257,44 @@ async function collectPlaybackFrames(tabId) {
   }
 }
 
-// Pick the best resumable video: the main visible player (largest viewport
-// area, readyState >= 2) with duration > 15s, preferring currentTime > 3s.
-function pickBestPlayback(results) {
+function frameHost(url) {
+  try { return new URL(url).host; } catch { return ""; }
+}
+
+// Pick the resumable video: duration > 15s and currentTime > 3s, largest
+// visible player first, then highest readyState, then longest duration.
+// With resumableOnly=false, fall back to the largest long video (to pause it).
+function pickBestPlayback(results, resumableOnly = true) {
   const candidates = [];
   for (const r of results) {
     if (!r || r.error || !r.result) continue;
     const frame = r.result;
     for (const v of (frame.videos || [])) {
-      // Ignore hidden/zero-size players and players not ready to report a timestamp.
-      if (!v.area || v.area <= 0) continue;
-      if (Number(v.readyState) < 2) continue;
-      if (v.duration > 15) {
-        candidates.push({
-          frameId: r.frameId,
-          frameUrl: frame.frameUrl,
-          index: v.index,
-          src: v.src,
-          duration: v.duration,
-          currentTime: v.currentTime,
-          paused: v.paused,
-          area: v.area,
-        });
-      }
+      if (!(v.duration > 15)) continue;
+      if (resumableOnly && !(v.currentTime > 3)) continue;
+      candidates.push({ ...v, frameId: r.frameId, frameUrl: frame.frameUrl });
     }
   }
   if (!candidates.length) return null;
-  const resumed = candidates.filter((v) => v.currentTime > 3);
-  const pool = resumed.length ? resumed : candidates;
-  // Largest visible player first, then longest duration (main content is usually biggest).
-  pool.sort((a, b) => b.area - a.area || b.duration - a.duration);
-  return pool[0];
+  candidates.sort((a, b) =>
+    (b.area || 0) - (a.area || 0) ||
+    (b.readyState || 0) - (a.readyState || 0) ||
+    b.duration - a.duration);
+  return candidates[0];
+}
+
+// Fallback: ask content.js (GET_VIDEO_STATE / "getVideoState") in every frame
+// individually; a tab-wide sendMessage only returns the first frame's reply,
+// which is usually the top frame with no player.
+async function videoStateAcrossFrames(tabId, frameIds) {
+  const ids = [...new Set(frameIds.filter((id) => Number.isInteger(id)))];
+  const asks = ids.length
+    ? ids.map((frameId) => chrome.tabs.sendMessage(tabId, { type: "getVideoState" }, { frameId })
+      .then((state) => ({ frameId, result: { frameUrl: "", videos: (state && state.videos) || [] } })))
+    : [chrome.tabs.sendMessage(tabId, { type: "getVideoState" })
+      .then((state) => ({ frameId: 0, result: { frameUrl: "", videos: (state && state.videos) || [] } }))];
+  const settled = await Promise.allSettled(asks);
+  return settled.filter((r) => r.status === "fulfilled").map((r) => r.value);
 }
 
 // Pause the selected video inside its own frame so the browser stops decoding.
@@ -335,40 +329,33 @@ async function go(action, explicitUrl) {
   const tab = await activeTab();
   let startTime;
   let duration;
+  let startTimeSource = "none";
   if (tab && tab.id != null) {
     // Recover playback position from every frame (works for iframe players like
-    // ShowBox / CineSrc / VidSrc where the top frame reports currentTime 0).
+    // febbox.com / ShowBox / CineSrc where the top frame reports currentTime 0).
     const results = await collectPlaybackFrames(tab.id);
-    const best = pickBestPlayback(results);
+    let best = pickBestPlayback(results);
+    let via = "executeScript";
+    if (!best) {
+      const states = await videoStateAcrossFrames(tab.id, results.map((r) => r && r.frameId));
+      best = pickBestPlayback(states);
+      via = "getVideoState";
+    }
     if (best) {
-      await pausePlaybackInFrame(tab.id, best);
       startTime = best.currentTime;
       duration = best.duration;
+      startTimeSource = via + " frame=" + best.frameId + (best.frameUrl ? " host=" + frameHost(best.frameUrl) : "");
+    }
+    const toPause = best || pickBestPlayback(results, false);
+    if (toPause && toPause.src) {
+      await pausePlaybackInFrame(tab.id, toPause);
+    } else if (toPause) {
+      try { await chrome.tabs.sendMessage(tab.id, { type: "pauseVideos" }, { frameId: toPause.frameId }); } catch { /* no content script */ }
     } else if ($("autoPlay").checked) {
       await pauseBrowserVideos(tab.id);
     }
-
-    // Fallback: read currentTime from content.js's GET_VIDEO_STATE broadcast
-    // across all frames (cross-origin player iframes such as febbox.com /
-    // CineSrc where scripting may be limited) so startTime is never 0 when the
-    // visible player is at e.g. 17:40.
-    if (startTime == null || startTime <= 0) {
-      try {
-        const state = await chrome.tabs.sendMessage(tab.id, { type: "getVideoState" });
-        const videos = state && state.videos;
-        if (videos && videos.length) {
-          const main = videos.find((v) => v.currentTime > 3) || videos[0];
-          if (main && main.currentTime > 3) {
-            startTime = main.currentTime;
-            duration = main.duration;
-          }
-        }
-      } catch {
-        // content script not injected on this tab
-      }
-    }
   }
-  
+
   // Step 2: Handing off to native host
   setStep(progressEl, 1, "done");
   setStep(progressEl, 2, "active");
@@ -380,6 +367,7 @@ async function go(action, explicitUrl) {
     action,
     startTime,
     duration,
+    startTimeSource,
   });
   
   // Step 3: Opening Enhanced MPV

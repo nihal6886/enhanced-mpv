@@ -161,6 +161,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         currentTime: el.currentTime || 0,
         duration: el.duration || 0,
         paused: el.paused,
+        readyState: el.readyState || 0,
+        area: (() => { const r = el.getBoundingClientRect(); return Math.max(0, r.width) * Math.max(0, r.height); })(),
       };
     }).filter(v => v.src);
     sendResponse({ videos });

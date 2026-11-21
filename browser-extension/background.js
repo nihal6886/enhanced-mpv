@@ -180,6 +180,17 @@ function isAudioPlaylistUrl(url) {
   return AUDIO_PLAYLIST_RE.test(url.toLowerCase());
 }
 
+// Root-level ".../<id>.m3u8" (e.g. hls.shegu.net/40097260.m3u8) with no
+// /video/ or /audio/ path segment: treat as a candidate master manifest until
+// its body proves it is a media playlist.
+function isRootManifestCandidate(url) {
+  let pathname;
+  try { pathname = new URL(url).pathname; } catch { return false; }
+  if (!/\.m3u8$/i.test(pathname)) return false;
+  if (/\/(?:video|audio)\//i.test(pathname)) return false;
+  return pathname.split("/").filter(Boolean).length === 1;
+}
+
 const audioProbeDone = new Set();
 const audioRecoveryInFlight = new Map();
 const HOT_ATTACH_WINDOW_MS = 15000;
@@ -556,7 +567,7 @@ function scoreStreamCandidate(url, headers, tabId, allVideos = [], audioStreams 
   // STRICT MASTER-MANIFEST PRIORITY: +3500 base score for master manifests so a
   // verified master manifest always outranks a proxy-video entry (2800 base).
   // Never select video-only sub-playlist over master manifest
-  if (isMasterManifestUrl(u)) {
+  if (isMasterManifestUrl(u) || isRootManifestCandidate(url)) {
     kind = "hls-master";
     score += 3500; // hls-master base (3500) must stay above proxy-video (2800)
 
@@ -689,6 +700,20 @@ function addVideo(tabId, url, extra) {
   if (kind === "hls-video-only" && !audioUrl) {
     void ensureAudioRecovery(tabId, url, headers, frameId);
   }
+}
+
+function demoteRootManifestCandidate(tabId, url) {
+  if (!isRootManifestCandidate(url) || isMasterManifestUrl(url)) return false;
+  const state = getState(tabId);
+  const idx = state.videos.findIndex(v => v.url.split("?")[0] === url.split("?")[0]);
+  if (idx < 0) return false;
+  const v = state.videos[idx];
+  if (v.kind !== "hls-master" || v.playUrl) return false;
+  const r = scoreVideoOnly(v.url, v.url.toLowerCase(), v.frameId, state.videos, state.audioStreams, 500);
+  state.videos[idx] = { ...v, kind: r.kind, score: r.score, audioUrl: r.audioUrl, isVerifiedMaster: false };
+  state.videos.sort((a, b) => b.score - a.score);
+  persist(tabId);
+  return true;
 }
 
 async function resolveAndVerifyM3U8(tabId, url, headers) {
@@ -921,9 +946,12 @@ chrome.webRequest.onHeadersReceived.addListener(
           if (result && result.verified) {
             const videoIdx = state.videos.findIndex(v => v.url.split("?")[0] === url.split("?")[0]);
             if (videoIdx >= 0) {
+              const isMaster = !!(result.manifestInfo && result.manifestInfo.isMaster);
               state.videos[videoIdx] = {
                 ...state.videos[videoIdx],
-                url: result.url,
+                // Keep the master URL as the entry (mpv picks variants itself).
+                url: isMaster ? state.videos[videoIdx].url : result.url,
+                ...(isMaster ? { kind: "hls-master", isVerifiedMaster: true } : {}),
                 verified: true,
                 relayReady: true,
                 manifestInfo: result.manifestInfo,
@@ -932,9 +960,12 @@ chrome.webRequest.onHeadersReceived.addListener(
               persist(details.tabId);
             }
           }
+          const info = result && result.manifestInfo;
+          // A root-level candidate master whose body is a media playlist (no
+          // #EXT-X-STREAM-INF) is demoted back to a video-only sub-playlist.
+          if (info && !info.isMaster) demoteRootManifestCandidate(details.tabId, url);
           // Content-detected video-only sub-playlist: no audio track in the
           // manifest itself, so recover audio from frames or a parent master.
-          const info = result && result.manifestInfo;
           if (info && !info.isMaster && !info.hasAudio) {
             const entry = state.videos.find(v => v.url.split("?")[0] === url.split("?")[0]);
             if ((state.audioStreams || []).length === 0) {
@@ -1164,6 +1195,7 @@ async function buildPayload(tab, url, extra) {
     profile: cfg.profile || "",
     startTime,
     duration,
+    startTimeSource: (extra && extra.startTimeSource) || "",
     audioUrl,
     audioHeaders,
     manifestInfo,
@@ -1215,6 +1247,7 @@ async function launch(tab, url, action, extra) {
     action,
     startTime: extra && extra.startTime,
     duration: extra && extra.duration,
+    startTimeSource: extra && extra.startTimeSource,
     userAgent: extra && extra.userAgent,
   });
   const state = tab ? getState(tab.id) : null;
