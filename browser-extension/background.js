@@ -897,8 +897,7 @@ chrome.webRequest.onBeforeRequest.addListener(
     if (AUDIO_RE.test(url)) addAudioStream(details.tabId, url, details);
     if (SUB_RE.test(url)) addSub(details.tabId, url, details);
   },
-  { urls: ["<all_urls>"] },
-  ["requestHeaders"]
+  { urls: ["<all_urls>"] }
 );
 
 chrome.webRequest.onBeforeSendHeaders.addListener(
