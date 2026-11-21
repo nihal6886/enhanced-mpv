@@ -93,20 +93,150 @@ function scrapeFrames() {
   return frames;
 }
 
-function collect() {
-  const videos = [...document.querySelectorAll("video")].map((el) => {
-    // Skip hidden videos, YouTube ads, invalid/zero duration, or already-ended videos
-    if (el.offsetWidth === 0 || el.offsetHeight === 0) return null;
-    if (el.closest(".ad-showing, .ad-interrupting")) return null;
-    if (el.ended === true) return null;
-    if (el.duration <= 0) return null;
+const HOOK_REQ = "__empv_media_req";
+const HOOK_RES = "__empv_media_res";
+let hookSeq = 0;
+
+// Synchronous request to the MAIN-world media hook (media-hook.js). DOM events
+// dispatch synchronously, so the reply is available as soon as dispatchEvent
+// returns. Returns null when the hook is absent (e.g. older Firefox).
+function hookRequest(op, extra) {
+  const id = "c" + (++hookSeq) + "-" + Date.now();
+  let reply = null;
+  const onRes = (event) => {
+    try {
+      const data = JSON.parse(String(event.detail || "{}"));
+      if (data && data.id === id) reply = data;
+    } catch {
+      // ignore foreign events
+    }
+  };
+  document.addEventListener(HOOK_RES, onRes);
+  try {
+    document.dispatchEvent(new CustomEvent(HOOK_REQ, { detail: JSON.stringify({ id, op, ...(extra || {}) }) }));
+  } catch {
+    // ignore
+  } finally {
+    document.removeEventListener(HOOK_RES, onRes);
+  }
+  return reply;
+}
+
+// Every <video> in the document and in open shadow roots (closed roots are
+// covered by the MAIN-world hook).
+function deepVideos(root, out) {
+  const list = out || [];
+  const scope = root || document;
+  try {
+    for (const el of scope.querySelectorAll("*")) {
+      if (el instanceof HTMLVideoElement) list.push(el);
+      if (el.shadowRoot) deepVideos(el.shadowRoot, list);
+    }
+  } catch {
+    // ignore inaccessible roots
+  }
+  return list;
+}
+
+function elementArea(el) {
+  try {
+    const r = el.getBoundingClientRect();
+    return Math.max(0, r.width) * Math.max(0, r.height);
+  } catch {
+    return 0;
+  }
+}
+
+function finiteOrZero(n) {
+  const v = Number(n);
+  return Number.isFinite(v) ? v : 0;
+}
+
+// Merge DOM-visible videos with hook-registered media so closed Shadow DOM
+// players are reported with their true playback position.
+function videoState() {
+  const videos = deepVideos().map((el, index) => {
+    let src = "";
+    try { src = el.currentSrc || el.src || ""; } catch { src = ""; }
     return {
-      src: el.currentSrc || el.src || (el.querySelector("source") && el.querySelector("source").src) || "",
-      paused: el.paused,
-      duration: el.duration || 0,
-      currentTime: el.currentTime || 0,
+      index,
+      src,
+      currentTime: finiteOrZero(el.currentTime),
+      duration: finiteOrZero(el.duration),
+      paused: Boolean(el.paused),
+      ended: Boolean(el.ended),
+      readyState: el.readyState || 0,
+      area: elementArea(el),
     };
-  }).filter((v) => v && v.src);
+  });
+  const hook = hookRequest("state");
+  const hooked = (hook && Array.isArray(hook.media) ? hook.media : []).filter((m) => m.isVideo !== false);
+  for (const m of hooked) {
+    const dup = videos.find((v) => v.hookId == null && v.src === m.src &&
+      Math.abs(v.currentTime - m.currentTime) < 1);
+    if (dup) {
+      dup.hookId = m.hookId;
+      continue;
+    }
+    videos.push({
+      index: -1,
+      hookId: m.hookId,
+      src: m.src,
+      currentTime: finiteOrZero(m.currentTime),
+      duration: finiteOrZero(m.duration),
+      paused: Boolean(m.paused),
+      ended: Boolean(m.ended),
+      readyState: m.readyState || 0,
+      area: finiteOrZero(m.area),
+    });
+  }
+  return videos;
+}
+
+function pauseAllMedia() {
+  hookRequest("pause");
+  for (const v of deepVideos()) {
+    try { v.pause(); } catch { /* ignore */ }
+  }
+}
+
+// Resume only from a real mid-playback position: > 3 s in, a finite duration
+// over 15 s, and at least 10 s before the end.
+function isResumable(v) {
+  return Number.isFinite(v.currentTime) && Number.isFinite(v.duration) &&
+    v.currentTime > 3 && v.duration > 15 && v.currentTime < v.duration - 10;
+}
+
+function bestVideo(videos) {
+  const ranked = videos
+    .filter((v) => !v.ended && v.duration > 0)
+    .sort((a, b) =>
+      (b.area > 0) - (a.area > 0) ||
+      (!b.paused) - (!a.paused) ||
+      b.area - a.area ||
+      b.readyState - a.readyState ||
+      b.duration - a.duration);
+  return ranked[0] || null;
+}
+
+function collect() {
+  const videos = videoState().map((v) => {
+    // Skip hidden videos, ads, invalid/zero duration, or already-ended videos
+    if (!(v.area > 0)) return null;
+    if (v.ended || !(v.duration > 0)) return null;
+    return {
+      src: v.src,
+      paused: v.paused,
+      duration: v.duration,
+      currentTime: v.currentTime,
+    };
+  }).filter((v) => v && v.src && !v.src.startsWith("blob:"));
+  // Ad overlays are still excluded when the DOM can see them.
+  for (const el of document.querySelectorAll(".ad-showing video, .ad-interrupting video")) {
+    const src = el.currentSrc || el.src || "";
+    const i = videos.findIndex((v) => v.src === src);
+    if (i >= 0) videos.splice(i, 1);
+  }
 
   const tracks = [...document.querySelectorAll("track")].map((el) => ({
     src: el.src,
@@ -145,27 +275,12 @@ setInterval(post, 4000);
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "pauseVideos") {
-    for (const v of document.querySelectorAll("video")) {
-      try { v.pause(); } catch { /* ignore */ }
-    }
+    pauseAllMedia();
     sendResponse({ ok: true });
     return;
   }
   if (msg.type === "getVideoState") {
-    const videos = [...document.querySelectorAll("video")].map((el, index) => {
-      let src = "";
-      try { src = el.currentSrc || el.src || ""; } catch { src = ""; }
-      return {
-        index,
-        src,
-        currentTime: el.currentTime || 0,
-        duration: el.duration || 0,
-        paused: el.paused,
-        readyState: el.readyState || 0,
-        area: (() => { const r = el.getBoundingClientRect(); return Math.max(0, r.width) * Math.max(0, r.height); })(),
-      };
-    }).filter(v => v.src);
-    sendResponse({ videos });
+    sendResponse({ videos: videoState().filter((v) => v.src || v.hookId != null) });
     return;
   }
   if (msg.type === "scan") {
@@ -183,10 +298,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (!match) return;
     const data = collect();
     const url = (data.videos[0] && data.videos[0].src) || location.href;
-    for (const v of document.querySelectorAll("video")) {
-      try { v.pause(); } catch { /* ignore */ }
+    const best = bestVideo(videoState());
+    pauseAllMedia();
+    const handoff = { type: "pauseAndHandoff", url };
+    if (best && isResumable(best)) {
+      handoff.startTime = best.currentTime;
+      handoff.duration = best.duration;
+      handoff.startTimeSource = "autoIntercept";
     }
-    chrome.runtime.sendMessage({ type: "pauseAndHandoff", url });
+    chrome.runtime.sendMessage(handoff);
   } catch {
     // storage unavailable
   }

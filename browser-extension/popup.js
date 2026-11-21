@@ -188,39 +188,107 @@ async function pauseBrowserVideos(tabId) {
   }
 }
 
-// Injected into every frame (allFrames: true): report every <video> with its
-// currentTime/duration/area/readyState so the popup can recover the playback
-// position from iframe players (febbox.com / ShowBox) where the top frame has
-// no video and reports 0.
+// Injected into every frame (allFrames: true): report every <video> (light
+// DOM, open shadow roots, and closed shadow roots via the MAIN-world media
+// hook) with currentTime/duration/area/readyState so the popup can recover the
+// playback position from iframe and Shadow DOM players. Must stay
+// self-contained: executeScript serializes only this function.
 function collectPlaybackFrame() {
+  const finite = (n) => { const v = Number(n); return Number.isFinite(v) ? v : 0; };
+  const deep = (root, out) => {
+    try {
+      for (const el of root.querySelectorAll("*")) {
+        if (el instanceof HTMLVideoElement) out.push(el);
+        if (el.shadowRoot) deep(el.shadowRoot, out);
+      }
+    } catch { /* ignore */ }
+    return out;
+  };
   let videos = [];
   try {
-    videos = Array.from(document.querySelectorAll("video")).map((v, index) => {
+    videos = deep(document, []).map((v, index) => {
       const rect = v.getBoundingClientRect();
       let src = "";
       try { src = v.currentSrc || v.src || ""; } catch { src = ""; }
       return {
         index,
         src,
-        currentTime: Number(v.currentTime) || 0,
-        duration: Number(v.duration) || 0,
+        currentTime: finite(v.currentTime),
+        duration: finite(v.duration),
         area: Math.max(0, rect.width || 0) * Math.max(0, rect.height || 0),
         readyState: Number(v.readyState) || 0,
         paused: Boolean(v.paused),
+        ended: Boolean(v.ended),
       };
     });
   } catch {
     // ignore inaccessible frames
+  }
+  try {
+    const id = "p" + Date.now() + Math.random();
+    let reply = null;
+    const onRes = (e) => {
+      try { const d = JSON.parse(String(e.detail || "{}")); if (d.id === id) reply = d; } catch { /* ignore */ }
+    };
+    document.addEventListener("__empv_media_res", onRes);
+    document.dispatchEvent(new CustomEvent("__empv_media_req", { detail: JSON.stringify({ id, op: "state" }) }));
+    document.removeEventListener("__empv_media_res", onRes);
+    for (const m of (reply && reply.media) || []) {
+      if (m.isVideo === false) continue;
+      const dup = videos.find((v) => v.hookId == null && v.src === m.src && Math.abs(v.currentTime - m.currentTime) < 1);
+      if (dup) { dup.hookId = m.hookId; continue; }
+      videos.push({
+        index: -1,
+        hookId: m.hookId,
+        src: m.src || "",
+        currentTime: finite(m.currentTime),
+        duration: finite(m.duration),
+        area: finite(m.area),
+        readyState: Number(m.readyState) || 0,
+        paused: Boolean(m.paused),
+        ended: Boolean(m.ended),
+      });
+    }
+  } catch {
+    // media hook unavailable
   }
   let frameUrl = "";
   try { frameUrl = (typeof location !== "undefined" && location.href) || ""; } catch { frameUrl = ""; }
   return { frameUrl, videos };
 }
 
-// Injected into a single frame: pause the exact <video> the popup selected.
+// Injected into a single frame: pause the exact media element the popup
+// selected (through the MAIN-world hook for closed Shadow DOM players).
 function pausePlaybackFrame(target) {
+  let done = false;
+  if (target.hookId != null) {
+    try {
+      const id = "p" + Date.now() + Math.random();
+      let reply = null;
+      const onRes = (e) => {
+        try { const d = JSON.parse(String(e.detail || "{}")); if (d.id === id) reply = d; } catch { /* ignore */ }
+      };
+      document.addEventListener("__empv_media_res", onRes);
+      document.dispatchEvent(new CustomEvent("__empv_media_req", {
+        detail: JSON.stringify({ id, op: "pause", hookId: target.hookId }),
+      }));
+      document.removeEventListener("__empv_media_res", onRes);
+      done = Boolean(reply && reply.paused > 0);
+    } catch {
+      // media hook unavailable
+    }
+  }
   try {
-    const nodes = Array.prototype.slice.call(document.querySelectorAll("video"));
+    const deep = (root, out) => {
+      try {
+        for (const el of root.querySelectorAll("*")) {
+          if (el instanceof HTMLVideoElement) out.push(el);
+          if (el.shadowRoot) deep(el.shadowRoot, out);
+        }
+      } catch { /* ignore */ }
+      return out;
+    };
+    const nodes = deep(document, []);
     let chosen = null;
     let bestDiff = Infinity;
     for (const el of nodes) {
@@ -233,15 +301,15 @@ function pausePlaybackFrame(target) {
         chosen = el;
       }
     }
-    if (!chosen || bestDiff >= 3) chosen = nodes[target.index];
+    if ((!chosen || bestDiff >= 3) && target.index >= 0) chosen = nodes[target.index];
     if (chosen) {
       try { chosen.pause(); } catch { /* ignore */ }
-      return true;
+      done = true;
     }
-    return false;
   } catch {
-    return false;
+    // ignore
   }
+  return done;
 }
 
 // Collect playback state from the top frame AND every iframe in the tab.
@@ -261,22 +329,31 @@ function frameHost(url) {
   try { return new URL(url).host; } catch { return ""; }
 }
 
-// Pick the resumable video: duration > 15s and currentTime > 3s, largest
-// visible player first, then highest readyState, then longest duration.
-// With resumableOnly=false, fall back to the largest long video (to pause it).
+// Resume only from a real mid-playback position: > 3 s in, a finite duration
+// over 15 s, and at least 10 s before the end (same bounds as the host).
+function isResumable(v) {
+  return Number.isFinite(v.currentTime) && Number.isFinite(v.duration) &&
+    v.currentTime > 3 && v.duration > 15 && v.currentTime < v.duration - 10;
+}
+
+// Pick the true visible player: visible first, then playing, then largest
+// area, highest readyState, longest duration. With resumableOnly=false, fall
+// back to the best long video (to pause it).
 function pickBestPlayback(results, resumableOnly = true) {
   const candidates = [];
   for (const r of results) {
     if (!r || r.error || !r.result) continue;
     const frame = r.result;
     for (const v of (frame.videos || [])) {
-      if (!(v.duration > 15)) continue;
-      if (resumableOnly && !(v.currentTime > 3)) continue;
+      if (v.ended || !(v.duration > 15)) continue;
+      if (resumableOnly && !isResumable(v)) continue;
       candidates.push({ ...v, frameId: r.frameId, frameUrl: frame.frameUrl });
     }
   }
   if (!candidates.length) return null;
   candidates.sort((a, b) =>
+    ((b.area || 0) > 0) - ((a.area || 0) > 0) ||
+    (!b.paused) - (!a.paused) ||
     (b.area || 0) - (a.area || 0) ||
     (b.readyState || 0) - (a.readyState || 0) ||
     b.duration - a.duration);
@@ -303,7 +380,7 @@ async function pausePlaybackInFrame(tabId, best) {
     await chrome.scripting.executeScript({
       target: { tabId, frameIds: [best.frameId] },
       func: pausePlaybackFrame,
-      args: [{ src: best.src, currentTime: best.currentTime, index: best.index }],
+      args: [{ src: best.src, currentTime: best.currentTime, index: best.index, hookId: best.hookId }],
     });
   } catch {
     // frame may have navigated away
@@ -347,7 +424,7 @@ async function go(action, explicitUrl) {
       startTimeSource = via + " frame=" + best.frameId + (best.frameUrl ? " host=" + frameHost(best.frameUrl) : "");
     }
     const toPause = best || pickBestPlayback(results, false);
-    if (toPause && toPause.src) {
+    if (toPause && (toPause.src || toPause.hookId != null)) {
       await pausePlaybackInFrame(tab.id, toPause);
     } else if (toPause) {
       try { await chrome.tabs.sendMessage(tab.id, { type: "pauseVideos" }, { frameId: toPause.frameId }); } catch { /* no content script */ }

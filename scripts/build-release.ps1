@@ -129,8 +129,6 @@ Reset-Dir $MpvStage
 Copy-Item (Join-Path $Root "mpv-config\*") $MpvStage -Recurse -Force
 $MpvScripts = Join-Path $MpvStage "scripts"
 Ensure-Dir $MpvScripts
-$UnusedStreamingOsd = Join-Path $MpvScripts "streaming-osd.lua"
-if (Test-Path $UnusedStreamingOsd) { Remove-Item $UnusedStreamingOsd -Force }
 foreach ($legacy in @(
     (Join-Path $MpvStage "mpvnet.conf"),
     (Join-Path $MpvStage "script-opts\uosc.conf")

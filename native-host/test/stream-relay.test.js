@@ -393,3 +393,49 @@ test("rewriteManifestUrls does not double-rewrite already-relayed URIs", () => {
   const out = rewriteManifestUrls(text, base, manifestBaseUrl);
   assert.strictEqual(out, text);
 });
+test("rewriteManifestUrls handles CRLF playlists and keeps non-HTTP key URIs", () => {
+  const text = "#EXTM3U\r\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"skd://key-id\"\r\n#EXT-X-MAP:URI=\"init.mp4\"\r\n#EXTINF:4,\r\nseg1.m4s\r\n";
+  const base = "http://127.0.0.1:1/tok/";
+  const out = rewriteManifestUrls(text, base, "https://cdn.example.com/v/index.m3u8");
+  assert.ok(!out.includes("\r"));
+  assert.ok(out.includes(base + encodeURIComponent("https://cdn.example.com/v/seg1.m4s")));
+  assert.ok(out.includes('URI="' + base + encodeURIComponent("https://cdn.example.com/v/init.mp4") + '"'));
+  assert.ok(out.includes('URI="skd://key-id"'));
+});
+
+test("startRelay rewrites nested variant playlists so their segments use the relay", async () => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    seen.push({ url: req.url, referer: req.headers.referer });
+    if (req.url === "/master.m3u8") {
+      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+      res.end("#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",URI=\"audio/a.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO=\"a\"\nvideo/v.m3u8\n");
+    } else if (req.url === "/video/v.m3u8") {
+      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+      res.end("#EXTM3U\n#EXTINF:4,\nseg1.ts\n");
+    } else if (req.url === "/video/seg1.ts") {
+      res.setHeader("Content-Type", "video/mp2t");
+      res.end("SEGMENT");
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
+  const origin = "http://127.0.0.1:" + upstream.address().port;
+  try {
+    const relayUrl = await startRelay(origin + "/master.m3u8", { Referer: "https://site.example/" });
+    const master = await (await fetch(relayUrl)).text();
+    const variantLine = master.split("\n").find((l) => l.startsWith("http://127.0.0.1") && l.includes("v.m3u8"));
+    assert.ok(variantLine, "variant playlist routed through relay");
+    assert.ok(/URI="http:\/\/127\.0\.0\.1:\d+\/[a-f0-9]+\/[^"]*audio%2Fa\.m3u8"/.test(master), "audio rendition routed through relay");
+    const variant = await (await fetch(variantLine)).text();
+    const segLine = variant.split("\n").find((l) => l.startsWith("http://127.0.0.1"));
+    assert.ok(segLine, "nested playlist segments routed through relay");
+    const seg = await (await fetch(segLine)).text();
+    assert.strictEqual(seg, "SEGMENT");
+    assert.ok(seen.every((s) => s.referer === "https://site.example/"), "every upstream request carries the tab headers");
+  } finally {
+    upstream.close();
+  }
+});

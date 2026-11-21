@@ -8,10 +8,8 @@
 
 local mp = require("mp")
 local msg = require("mp.msg")
-local utils = require("mp.utils")
 
 local NEON_GREEN = "#4ADE80"
-local NEON_GREEN_DIM = "#22C55E"
 local DARK_BG = "#141820"
 local DARK_CARD = "#1A1F2E"
 local TEXT_WHITE = "#FFFFFF"
@@ -24,8 +22,6 @@ menu_overlay.z = 300
 local active_menu = nil
 local menu_items = {}
 local selected_index = 1
-local mouse_x = 0
-local mouse_y = 0
 
 local QUALITY_OPTIONS = {
   { label = "2160p 4K", height = "2160" },
@@ -35,18 +31,6 @@ local QUALITY_OPTIONS = {
   { label = "480p", height = "480" },
   { label = "Auto", height = "auto" },
 }
-
-local function format_time(seconds)
-  if not seconds or seconds <= 0 then return "0:00" end
-  local h = math.floor(seconds / 3600)
-  local m = math.floor((seconds % 3600) / 60)
-  local s = math.floor(seconds % 60)
-  if h > 0 then
-    return string.format("%d:%02d:%02d", h, m, s)
-  else
-    return string.format("%d:%02d", m, s)
-  end
-end
 
 local function get_current_quality()
   local ytdl_format = mp.get_property("ytdl-format") or ""

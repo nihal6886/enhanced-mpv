@@ -149,6 +149,8 @@ copy_our_config() {
   for f in "$ROOT"/mpv-config/script-opts/*; do
     [[ "$(basename "$f")" == "uosc.conf" ]] || cp -f "$f" "$MPV_DIR/script-opts/"
   done
+  # Custom player icon used by window-icon.lua (same as install.ps1 / setup.iss).
+  cp -f "$ROOT/assets/enhanced-mpv.ico" "$MPV_DIR/enhanced-mpv.ico"
 }
 
 pin_thumbfast() {
@@ -232,7 +234,9 @@ uninstall() {
     rm -f "$dir/$HOST_NAME.json"
   done < <(chrome_manifest_dirs)
   rm -f "$(firefox_manifest_dir)/$HOST_NAME.json"
-  rm -f "$MPV_DIR/scripts/smart-sub-manager.lua" "$MPV_DIR/scripts/enhanced-mpv.lua"
+  for f in window-icon.lua enhanced-mpv.lua smart-sub-manager.lua loading-screen.lua player-menus.lua; do
+    rm -f "$MPV_DIR/scripts/$f"
+  done
   local latest
   latest="$(ls -1dt "$BACKUP_DIR"/* 2>/dev/null | head -n 1 || true)"
   if [[ -n "$latest" ]]; then

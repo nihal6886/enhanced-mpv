@@ -197,7 +197,8 @@ async function main() {
     "ffsubsync:    " + (report.ffsubsync || "missing"),
     "alass:        " + (report.alass || "missing"),
     "mpv config:   " + report.mpvConfigDir,
-    "ModernZ:      " + (report.modernz ? "ok" : "NOT INSTALLED (run scripts/install.ps1)"),
+    "ModernZ:      " + (report.modernz ? "ok" : "NOT INSTALLED (run " +
+      (report.platform === "win32" ? "scripts/install.ps1" : "scripts/install.sh") + ")"),
     "ModernZ Lua:  " + report.modernzScript,
     "ModernZ cfg:  " + report.modernzConfig,
     "ModernZ font: " + report.modernzIcons,
