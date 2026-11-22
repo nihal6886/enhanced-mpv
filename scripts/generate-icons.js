@@ -24,8 +24,8 @@ function chunk(type, data) {
   return Buffer.concat([len, t, data, crc]);
 }
 
-// Emerald play emblem on a dark rounded square, shared by the browser action
-// icons and the Windows .ico so the whole ecosystem reads as one product.
+// Dark rounded square + neon green play triangle.
+// Sizes include 16, 32, 48, 256 for crisp Windows/taskbar/icon rendering.
 const NEON_GREEN_BRIGHT = [74, 222, 128];   // #4ADE80
 const NEON_GREEN_DEEP = [34, 197, 94];      // #22C55E
 const TILE = [21, 24, 30];                  // #15181E dark rounded square background
@@ -45,9 +45,9 @@ function inRoundedSquare(nx, ny) {
 }
 
 function inPlay(nx, ny) {
-  const left = -0.16;
-  const apex = 0.27;
-  const half = 0.24;
+  const left = -0.14;
+  const apex = 0.24;
+  const half = 0.23;
   if (nx < left || nx > apex) return false;
   const t = (nx - left) / (apex - left);
   return Math.abs(ny) <= half * (1 - t);
@@ -55,7 +55,15 @@ function inPlay(nx, ny) {
 
 function sampleColor(nx, ny) {
   if (!inRoundedSquare(nx, ny)) return null;
-  if (inPlay(nx, ny)) return NEON_GREEN_BRIGHT;
+  if (inPlay(nx, ny)) {
+    const t = (ny + 0.5);
+    const mix = Math.max(0, Math.min(1, t));
+    return [
+      Math.round(NEON_GREEN_BRIGHT[0] * (1 - mix) + NEON_GREEN_DEEP[0] * mix),
+      Math.round(NEON_GREEN_BRIGHT[1] * (1 - mix) + NEON_GREEN_DEEP[1] * mix),
+      Math.round(NEON_GREEN_BRIGHT[2] * (1 - mix) + NEON_GREEN_DEEP[2] * mix),
+    ];
+  }
   return TILE;
 }
 
@@ -145,6 +153,7 @@ function main() {
   const sizes = [16, 24, 32, 48, 64, 128, 256];
   const entries = sizes.map((size) => ({ size, data: makePng(size) }));
   fs.writeFileSync(path.join(assetsDir, "enhanced-mpv.ico"), makeIco(entries));
+  console.log("Generated enhanced-mpv.ico with sizes: " + sizes.join(", "));
 }
 
 main();

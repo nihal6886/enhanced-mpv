@@ -9,16 +9,15 @@
 local mp = require("mp")
 local msg = require("mp.msg")
 
-local NEON_GREEN = "#4ADE80"
-local DARK_BG = "#141820"
-local DARK_CARD = "#1A1F2E"
-local TEXT_WHITE = "#FFFFFF"
-local TEXT_MUTED = "#888888"
-local BORDER_COLOR = "#2A3040"
-local HOVER_BG = "#1E2538"
+local NEON_GREEN = "4ADE80"
+local DARK_BG = "0D1117"
+local DARK_CARD = "161B22"
+local TEXT_WHITE = "E6EDF3"
+local TEXT_MUTED = "8B949E"
+local BORDER_COLOR = "30363D"
+local HOVER_BG = "1F2937"
 
 local menu_overlay = mp.create_osd_overlay("ass-events")
-menu_overlay.z = 300
 local active_menu = nil
 local menu_items = {}
 local selected_index = 1
@@ -63,9 +62,9 @@ local function get_audio_tracks()
       local codec = t.codec or ""
       local channels = t["audio-channels"] or 0
       local label = lang
-      if title ~= "" then label = label + " · " + title end
-      if codec ~= "" then label = label + " · " + codec:upper() end
-      if channels > 0 then label = label + " · " + channels + "ch" end
+      if title ~= "" then label = label .. " · " .. title end
+      if codec ~= "" then label = label .. " · " .. codec:upper() end
+      if channels > 0 then label = label .. " · " .. tostring(channels) .. "ch" end
       table.insert(audio_tracks, { id = t.id, label = label, selected = t.selected })
     end
   end
@@ -80,30 +79,37 @@ local function get_subtitle_tracks()
       local lang = t.lang or "und"
       local title = t.title or ""
       local label = lang
-      if title ~= "" then label = label + " · " + title end
+      if title ~= "" then label = label .. " · " .. title end
       table.insert(sub_tracks, { id = t.id, label = label, selected = t.selected, external = t.external or false })
     end
   end
   return sub_tracks
 end
 
+local function ass_rgb(rgb)
+  return string.format("&H%s&", rgb)
+end
+
 local function build_menu_ass(title, items, selected)
   local ass = {}
-  table.insert(ass, string.format("{\\an7\\fs28\\b1\\bord0\\shad0\\1c&H%s&\\4c&H%s&}%s", NEON_GREEN, DARK_BG, title))
-  table.insert(ass, "{\\fs14\\1c&H" .. TEXT_MUTED .. "}\\n")
+  local x, y, w, row_h = 70, 90, 520, 38
+  local panel_h = 74 + (#items * row_h)
+  table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\bord1\\shad0\\1c%s\\3c%s\\alpha&H20&}", x - 18, y - 16, ass_rgb(DARK_BG), ass_rgb(BORDER_COLOR)))
+  table.insert(ass, string.format("{\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}", w, w, panel_h, panel_h))
+  table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs30\\b1\\bord0\\shad0\\1c%s}%s", x, y, ass_rgb(NEON_GREEN), title))
+  table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs16\\bord0\\shad0\\1c%s}%s", x, y + 34, ass_rgb(TEXT_MUTED), "j/k or arrows · Enter select · Esc close"))
 
   for i, item in ipairs(items) do
     local is_selected = (i == selected)
     local is_active = item.selected or (item.height and item.height == get_current_quality())
+    local row_y = y + 62 + (i - 1) * row_h
     local bg_color = is_selected and HOVER_BG or DARK_CARD
     local border = is_selected and NEON_GREEN or BORDER_COLOR
     local text_color = is_active and NEON_GREEN or TEXT_WHITE
-    local checkmark = is_active and " {\\1c&H" .. NEON_GREEN .. "}\\uE8FB" or ""
-
-    table.insert(ass, string.format(
-      "{\\an7\\fs22\\b0\\bord0\\shad0\\1c&H%s&\\4c&H%s&\\3c&H%s&}  %s%s\\n",
-      text_color, bg_color, border, item.label, checkmark
-    ))
+    local prefix = is_active and "● " or "  "
+    table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\bord1\\shad0\\1c%s\\3c%s\\alpha&H10&}", x - 8, row_y - 4, ass_rgb(bg_color), ass_rgb(border)))
+    table.insert(ass, string.format("{\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}", w - 20, w - 20, row_h - 6, row_h - 6))
+    table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs22\\bord0\\shad0\\1c%s}%s%s", x + 6, row_y + 1, ass_rgb(text_color), prefix, item.label))
   end
 
   return table.concat(ass, "")
@@ -131,7 +137,7 @@ local function show_menu(menu_type)
     end
   end
 
-  local title = menu_type:sub(1,1):upper() + menu_type:sub(2)
+  local title = menu_type:sub(1,1):upper() .. menu_type:sub(2)
   menu_overlay.data = build_menu_ass(title, menu_items, selected_index)
   menu_overlay:update()
 end
@@ -148,7 +154,7 @@ local function navigate_menu(direction)
   selected_index = selected_index + direction
   if selected_index < 1 then selected_index = #menu_items end
   if selected_index > #menu_items then selected_index = 1 end
-  local title = active_menu:sub(1,1):upper() + active_menu:sub(2)
+  local title = active_menu:sub(1,1):upper() .. active_menu:sub(2)
   menu_overlay.data = build_menu_ass(title, menu_items, selected_index)
   menu_overlay:update()
 end
@@ -175,29 +181,27 @@ local function audio_sync_adjust(ms)
   mp.osd_message("Audio sync: " .. (ms > 0 and "+" or "") .. ms .. "ms", 1.5)
 end
 
--- Key bindings
-mp.add_key_binding("q", "quality-menu", function()
+-- Key bindings (avoid conflicts with input.conf: q=standby quit, a/s cycle tracks)
+mp.add_key_binding("Ctrl+Alt+q", "quality-menu", function()
   if active_menu == "quality" then hide_menu() else show_menu("quality") end
 end)
 
-mp.add_key_binding("a", "audio-menu", function()
+mp.add_key_binding("Ctrl+Alt+a", "audio-menu", function()
   if active_menu == "audio" then hide_menu() else show_menu("audio") end
 end)
 
-mp.add_key_binding("s", "subtitle-menu", function()
+mp.add_key_binding("Ctrl+Alt+s", "subtitle-menu", function()
   if active_menu == "subtitles" then hide_menu() else show_menu("subtitles") end
 end)
 
-mp.add_key_binding("ESC", "hide-menu", hide_menu)
-mp.add_key_binding("UP", "menu-up", function() navigate_menu(-1) end)
-mp.add_key_binding("DOWN", "menu-down", function() navigate_menu(1) end)
-mp.add_key_binding("ENTER", "menu-select", activate_menu_item)
-mp.add_key_binding("RIGHT", "menu-select", activate_menu_item)
+mp.add_key_binding(nil, "menu-up", function() navigate_menu(-1) end)
+mp.add_key_binding(nil, "menu-down", function() navigate_menu(1) end)
+mp.add_key_binding(nil, "menu-select", activate_menu_item)
+mp.add_key_binding(nil, "menu-hide", hide_menu)
 
--- Audio sync keys
-mp.add_key_binding("Ctrl+LEFT", "audio-sync-earlier", function() audio_sync_adjust(-50) end)
-mp.add_key_binding("Ctrl+RIGHT", "audio-sync-later", function() audio_sync_adjust(50) end)
-mp.add_key_binding("Ctrl+DOWN", "audio-sync-reset", function() audio_sync_adjust(0) end)
+mp.add_key_binding("Ctrl+Shift+LEFT", "audio-sync-earlier", function() audio_sync_adjust(-50) end)
+mp.add_key_binding("Ctrl+Shift+RIGHT", "audio-sync-later", function() audio_sync_adjust(50) end)
+mp.add_key_binding("Ctrl+Shift+DOWN", "audio-sync-reset", function() mp.set_property_number("audio-delay", 0); mp.osd_message("Audio sync reset", 1.2) end)
 
 -- Mouse support (requires uosc or similar for mouse position)
 mp.register_script_message("player-menu-show", function(menu_type)

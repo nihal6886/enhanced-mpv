@@ -1,6 +1,8 @@
 "use strict";
 
 const HOST = "com.enhanced.mpv.host";
+const DAEMON_ENDPOINT_KEY = "empv_daemon_endpoint";
+const DAEMON_TIMEOUT_MS = 1200;
 const VIDEO_RE = /\.(m3u8|mpd|mp4|mkv|webm)(?:$|[?#])/i;
 const AUDIO_RE = /\.(aac|m4a)(?:$|[?#])/i;
 const SUB_RE = /\.(vtt|srt|ass|ssa|dfxp|ttml)(?:$|[?#])/i;
@@ -1057,7 +1059,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return;
     }
     if (msg.type === "native") {
-      sendResponse(await nativeSend(msg.payload || { action: "getConfig" }));
+      const payload = msg.payload || { action: "getConfig" };
+      if (payload.action === "prewarm") {
+        sendResponse(await prewarmNative());
+        return;
+      }
+      if (payload.action === "play" || payload.action === "queue") {
+        const endpoint = await getDaemonEndpoint();
+        const daemonResult = await daemonSend(payload, endpoint);
+        if (daemonResult) {
+          sendResponse(daemonResult);
+          return;
+        }
+      }
+      const nativeResult = await nativeSend(payload);
+      if (nativeResult && nativeResult.endpoint) await setDaemonEndpoint(nativeResult.endpoint);
+      sendResponse(nativeResult);
       return;
     }
     if (msg.type === "linkExtension") {
@@ -1232,8 +1249,67 @@ function nativeSend(payload) {
   });
 }
 
+async function getDaemonEndpoint() {
+  try {
+    const stored = await chrome.storage.local.get([DAEMON_ENDPOINT_KEY]);
+    const endpoint = stored[DAEMON_ENDPOINT_KEY];
+    if (endpoint && Number.isInteger(endpoint.port) && endpoint.port > 0 && typeof endpoint.token === "string") {
+      return endpoint;
+    }
+  } catch { /* storage unavailable */ }
+  return null;
+}
+
+async function setDaemonEndpoint(endpoint) {
+  if (!endpoint || !Number.isInteger(endpoint.port) || typeof endpoint.token !== "string") return;
+  try {
+    await chrome.storage.local.set({ [DAEMON_ENDPOINT_KEY]: endpoint });
+  } catch { /* storage unavailable */ }
+}
+
+async function clearDaemonEndpoint() {
+  try {
+    await chrome.storage.local.remove(DAEMON_ENDPOINT_KEY);
+  } catch { /* storage unavailable */ }
+}
+
+async function daemonSend(payload, endpoint) {
+  if (!endpoint) return null;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = setTimeout(() => controller && controller.abort(), DAEMON_TIMEOUT_MS);
+  try {
+    const response = await fetch("http://127.0.0.1:" + endpoint.port + "/dispatch", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-enhanced-mpv-token": endpoint.token,
+      },
+      body: JSON.stringify(payload),
+      signal: controller ? controller.signal : undefined,
+    });
+    if (response.status === 401 || response.status === 403) {
+      await clearDaemonEndpoint();
+      return null;
+    }
+    if (!response.ok) throw new Error("daemon status " + response.status);
+    return await response.json();
+  } catch {
+    await clearDaemonEndpoint();
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function prewarmNative() {
+  const result = await nativeSend({ action: "prewarm" });
+  if (result && result.endpoint) await setDaemonEndpoint(result.endpoint);
+  return result;
+}
+
 async function registerId() {
   const res = await nativeSend({ action: "register_id", extensionId: chrome.runtime.id });
+  if (res && res.endpoint) await setDaemonEndpoint(res.endpoint);
   try {
     await chrome.storage.local.set({ linkStatus: { ...res, id: chrome.runtime.id, at: Date.now() } });
   } catch {
@@ -1260,7 +1336,15 @@ async function launch(tab, url, action, extra) {
   });
   const state = tab ? getState(tab.id) : null;
   if (state) state.lastLaunch = { time: Date.now(), url: payload.url };
-  const result = await nativeSend(payload);
+  let result = null;
+  if (payload.action === "play" || payload.action === "queue") {
+    const endpoint = await getDaemonEndpoint();
+    result = await daemonSend(payload, endpoint);
+  }
+  if (!result) {
+    result = await nativeSend(payload);
+    if (result && result.endpoint) await setDaemonEndpoint(result.endpoint);
+  }
   await chrome.storage.local.set({ lastLaunch: { payload: redactPayload(payload), result, at: Date.now() } });
   if (!result.ok) {
     const msg = result.error || "Playback failed";
@@ -1309,6 +1393,7 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
 });
 
 chrome.runtime.onInstalled.addListener(() => {
+  void prewarmNative().catch(() => {});
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: "play-now",
@@ -1326,8 +1411,12 @@ chrome.runtime.onInstalled.addListener(() => {
       contexts: ["link", "video", "audio"],
     });
   });
-  registerId();
 });
+
+chrome.runtime.onStartup.addListener(() => {
+  void prewarmNative().catch(() => {});
+});
+
 
 chrome.storage.sync.get("extension", (data) => {
   void data;

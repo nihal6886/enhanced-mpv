@@ -15,7 +15,7 @@ function loadBackground() {
   const listener = { addListener: noop };
   let badgeText = "";
   const chrome = {
-    runtime: { onMessage: listener, onInstalled: listener, id: "test-extension" },
+    runtime: { onMessage: listener, onInstalled: listener, onStartup: listener, id: "test-extension" },
     webRequest: {
       onBeforeRequest: listener,
       onBeforeSendHeaders: listener,

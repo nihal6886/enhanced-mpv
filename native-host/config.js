@@ -60,6 +60,9 @@ function writeConfig(next) {
 }
 
 function ipcPath() {
+  if (process.env.ENHANCED_MPV_IPC_PATH) {
+    return process.env.ENHANCED_MPV_IPC_PATH;
+  }
   if (process.platform === "win32") {
     return "\\\\.\\pipe\\enhanced-mpv-socket";
   }

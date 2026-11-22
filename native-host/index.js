@@ -4,7 +4,8 @@ const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const { encodeMessage, createFramer } = require("./protocol");
-const { play, findMpv, attachAudio, ipcAlive, spawnMpv } = require("./mpv-launcher");
+const { fastDispatch, findMpv, attachAudio, ipcAlive, spawnMpv, appendLaunchLog, setRelayInProcess } = require("./mpv-launcher");
+const { ensureLaunchDaemon, readDaemonEndpoint } = require("./launch-daemon");
 const relay = require("./stream-relay");
 const { readConfig, writeConfig, configDir, ensureDir, ipcPath } = require("./config");
 const { isSafeUrl } = require("./sanitizer");
@@ -191,15 +192,19 @@ async function handle(msg) {
     case "register_id":
       return registerId(msg.extensionId);
     case "queue":
-      return play(msg, "queue");
+      return fastDispatch(msg, "queue");
     case "play":
     case "playNow":
-      return play(msg, "replace");
+      return fastDispatch(msg, "replace");
     case "attachAudio":
       return attachAudio(msg);
-    case "prewarm":
-      // Pre-warm: spawn mpv with --idle=yes so it's ready for instant launch
-      return prewarmMpv();
+    case "prewarm": {
+      const warmed = await prewarmMpv();
+      const endpoint = process.env.ENHANCED_MPV_DAEMON === "1"
+        ? readDaemonEndpoint()
+        : await ensureLaunchDaemon(2500);
+      return { ...warmed, endpoint };
+    }
     case "startRelay": {
       // Start localhost HLS relay for protected streams
       const { url, headers } = msg;
@@ -214,11 +219,11 @@ async function handle(msg) {
       }
     }
     case "copyCommand": {
-      const result = await play({ ...msg, action: "play" }, "replace");
+      const result = await fastDispatch({ ...msg, action: "play" }, "replace");
       return result;
     }
     default:
-      if (msg.url) return play(msg, action === "queue" ? "queue" : "replace");
+      if (msg.url) return fastDispatch(msg, action === "queue" ? "queue" : "replace");
       return { ok: false, error: "unknown action", code: "BAD_URL", command: [] };
   }
 }
@@ -241,55 +246,68 @@ async function prewarmMpv() {
   return { ok: true, error: null, code: "OK", warmed: true, command: [] };
 }
 
-// Detached relay helper (spawned by mpv-launcher): read one JSON request from
-// stdin, start the relay, print its URL, and keep serving until every relay
-// has been idle long enough to be cleaned up.
-function runRelayDaemon() {
-  let input = "";
-  let started = false;
-  const reply = (obj) => {
-    try { process.stdout.write(JSON.stringify(obj) + "\n"); } catch { /* parent gone */ }
-  };
-  process.stdout.on("error", () => {});
-  process.stdin.on("error", () => {});
-  process.stdin.on("data", async (chunk) => {
-    if (started) return;
-    input += chunk.toString("utf8");
-    const nl = input.indexOf("\n");
-    if (nl < 0) return;
-    started = true;
+function relayLog(message) {
+  appendLaunchLog("[" + new Date().toISOString() + "] " + message);
+}
+
+function runRelayDaemonConfig() {
+  const configArgIndex = process.argv.indexOf("--relay-config");
+  const configPath = configArgIndex >= 0 ? process.argv[configArgIndex + 1] : null;
+  const resultPathArgIndex = process.argv.indexOf("--relay-result");
+  const resultPathFromArg = resultPathArgIndex >= 0 ? process.argv[resultPathArgIndex + 1] : null;
+  const writeResult = (payload, resultPath) => {
+    if (!resultPath) return;
     try {
-      const req = JSON.parse(input.slice(0, nl));
-      let out;
-      if (req.kind === "master") {
-        const r = await relay.startMasterRelay(req.videoUrl, req.videoHeaders || {}, req.audioUrl, req.audioHeaders || {});
-        out = { ok: true, masterRelayUrl: r.masterRelayUrl };
-      } else {
-        out = { ok: true, relayUrl: await relay.startRelay(req.url, req.headers || {}) };
-      }
-      // Keep the process alive by ref'ing the server sockets
+      fs.writeFileSync(resultPath, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 });
+    } catch (err) {
+      relayLog("relay result write failed: " + String((err && err.message) || err));
+    }
+  };
+  let request = null;
+  try {
+    request = configPath ? JSON.parse(fs.readFileSync(configPath, "utf8")) : null;
+  } catch (err) {
+    const message = String((err && err.message) || err);
+    relayLog("relay config parse failed: " + message);
+    writeResult({ ok: false, error: message }, resultPathFromArg);
+    process.exit(1);
+    return;
+  }
+  const resultPath = (request && request.resultPath) || resultPathFromArg;
+  const fail = (err) => {
+    const message = String((err && err.message) || err);
+    relayLog("relay daemon failed: " + message);
+    writeResult({ ok: false, error: message }, resultPath);
+    process.exit(1);
+  };
+  try {
+    const run = request && request.kind === "master"
+      ? relay.startMasterRelay(request.videoUrl, request.videoHeaders || {}, request.audioUrl, request.audioHeaders || {})
+        .then((result) => ({ ok: true, masterRelayUrl: result.masterRelayUrl }))
+      : relay.startRelay(request.url, request.headers || {})
+        .then((relayUrl) => ({ ok: true, relayUrl }));
+    run.then((payload) => {
       for (const entry of relay.activeRelays.values()) {
         if (entry.server) entry.server.ref();
       }
-      reply(out);
-      // After replying, we keep the process alive. The parent will close stdin,
-      // but we continue running until all relays are idle.
-    } catch (err) {
-      reply({ ok: false, error: String((err && err.message) || err) });
-      process.exit(1);
-    }
-  });
-  // On Windows, stdin may not emit 'end' when parent closes pipe. Use a timer
-  // to detect parent disconnect and exit gracefully if no relays are active.
-  let parentAlive = true;
-  process.stdin.on("end", () => { parentAlive = false; });
-  process.stdin.on("close", () => { parentAlive = false; });
-  setInterval(() => {
-    relay.cleanupOldRelays();
-    if (started && relay.activeRelays.size === 0) process.exit(0);
-    // If parent died and no relays, exit
-    if (!parentAlive && relay.activeRelays.size === 0) process.exit(0);
-  }, 30000);
+      writeResult(payload, resultPath);
+      const keepAlive = setInterval(() => {
+        relay.cleanupOldRelays();
+        if (relay.activeRelays.size === 0) {
+          clearInterval(keepAlive);
+          process.exit(0);
+        }
+      }, 30000);
+      const shutdown = () => { clearInterval(keepAlive); process.exit(0); };
+      process.on("SIGTERM", shutdown);
+      process.on("SIGINT", shutdown);
+      process.stdin.resume();
+      process.stdin.on("end", shutdown);
+      process.stdin.on("close", shutdown);
+    }).catch(fail);
+  } catch (err) {
+    fail(err);
+  }
 }
 
 function startClipboardWatch() {
@@ -323,8 +341,18 @@ function startClipboardWatch() {
 }
 
 function main() {
-  if (process.argv.includes("--relay-daemon")) {
-    runRelayDaemon();
+  if (process.argv.includes("--relay-config") || process.argv.includes("--relay-daemon")) {
+    runRelayDaemonConfig();
+    return;
+  }
+  if (process.argv.includes("--launch-daemon")) {
+    ensureDir(configDir());
+    setRelayInProcess(true);
+    const { startLaunchDaemon } = require("./launch-daemon");
+    startLaunchDaemon().catch((err) => {
+      appendLaunchLog("[" + new Date().toISOString() + "] launch daemon failed: " + String((err && err.message) || err));
+      process.exit(1);
+    });
     return;
   }
   ensureDir(configDir());

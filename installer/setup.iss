@@ -68,8 +68,9 @@ Source: "{tmp}\yt-dlp.exe"; DestDir: "{app}\bin"; Flags: external ignoreversion 
 Source: "{tmp}\mpv.7z"; DestDir: "{localappdata}\Programs\mpv"; Flags: external extractarchive recursesubdirs createallsubdirs ignoreversion skipifsourcedoesntexist; Check: WantMpvArchiveFile
 
 [Icons]
-Name: "{userprograms}\Enhanced MPV\Setup Guide"; Filename: "{app}\onboarding\index.html"
+Name: "{userprograms}\Enhanced MPV\Setup Guide"; Filename: "{code:OnboardingUrl}"
 Name: "{userprograms}\Enhanced MPV\Enhanced MPV"; Filename: "{code:MpvExeForIcon}"; WorkingDir: "{app}\mpv"; IconFilename: "{app}\mpv\enhanced-mpv.ico"; Comment: "Enhanced MPV player"; Check: HaveMpvForIcon
+Name: "{userprograms}\Enhanced MPV\Uninstall Enhanced MPV"; Filename: "{uninstallexe}"
 
 [Registry]
 ; --- Native Messaging host registration (per user, no admin) ---------------
@@ -80,7 +81,7 @@ Root: HKCU; Subkey: "Software\BraveSoftware\Brave\NativeMessagingHosts\{#HostNam
 Root: HKCU; Subkey: "Software\Mozilla\NativeMessagingHosts\{#HostName}"; ValueType: string; ValueName: ""; ValueData: "{app}\manifests\{#HostName}.firefox.json"; Flags: uninsdeletekey
 
 [Run]
-Filename: "{app}\onboarding\index.html"; Description: "Open the 3-step setup guide"; Flags: postinstall shellexec nowait skipifsilent
+Filename: "{code:OnboardingUrl}"; Description: "Open the 3-step setup guide"; Flags: postinstall shellexec nowait skipifsilent
 Filename: "{code:GetChromeExe}"; Parameters: "chrome://extensions"; Description: "Open Chrome extensions page (paste the folder we copied)"; Flags: postinstall nowait skipifsilent; Check: LaunchChrome
 Filename: "{code:GetBraveExe}"; Parameters: "brave://extensions"; Description: "Open Brave extensions page (paste the folder we copied)"; Flags: postinstall nowait skipifsilent; Check: LaunchBrave
 Filename: "{code:GetEdgeExe}"; Parameters: "edge://extensions"; Description: "Open Edge extensions page (paste the folder we copied)"; Flags: postinstall nowait skipifsilent; Check: LaunchEdge
@@ -112,6 +113,40 @@ var
   RceditExe: String;
 
 // ----------------------------------------------------------------- helpers --
+
+function HexByte(B: Integer): String;
+var
+  HexChars: String;
+begin
+  HexChars := '0123456789ABCDEF';
+  Result := Copy(HexChars, (B shr 4) + 1, 1) + Copy(HexChars, (B and $0F) + 1, 1);
+end;
+
+function UrlEncodeComponent(const S: String): String;
+var
+  I: Integer;
+  C: Char;
+begin
+  Result := '';
+  for I := 1 to Length(S) do
+  begin
+    C := S[I];
+    if ((C >= 'A') and (C <= 'Z')) or ((C >= 'a') and (C <= 'z')) or ((C >= '0') and (C <= '9')) or (C = '-') or (C = '_') or (C = '.') or (C = '~') then
+      Result := Result + C
+    else if C = ' ' then
+      Result := Result + '%20'
+    else
+      Result := Result + '%' + HexByte(Ord(C));
+  end;
+end;
+
+function OnboardingUrl(Param: String): String;
+var
+  ExtPath: String;
+begin
+  ExtPath := ExpandConstant('{app}\extension');
+  Result := ExpandConstant('{app}\onboarding\index.html') + '?extPath=' + UrlEncodeComponent(ExtPath);
+end;
 
 function FirstExisting(const Paths: array of String): String;
 var

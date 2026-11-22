@@ -1,204 +1,273 @@
---[[
-  loading-screen.lua
-
-  Instant (< 100ms) ASS loading overlay that renders the moment the window appears.
-  Shows a sleek dark studio card with neon-green accents and a live pipeline
-  checklist. Auto-clears on first frame (playback-restart) or shows clean error
-  message on end-file failure.
-]]
+-- Enhanced MPV - Dark Studio opening sequence
+-- 60 fps ASS overlay: neon ring, waveform, title, quality/codec pill, cache bar.
 
 local mp = require("mp")
-local msg = require("mp.msg")
+local assdraw = require("mp.assdraw")
+
+local opts = {
+    enabled = true,
+    duration_ms = 1200,
+    fade_ms = 260,
+}
+require("mp.options").read_options(opts, "loading-screen")
+if not opts.enabled then return end
+
+local BG = "0D1117"
+local GREEN = "4ADE80"
+local GREEN_DIM = "2D5A43"
+local TEXT = "E6EDF3"
+local MUTED = "8B949E"
+local PANEL = "161B22"
 
 local overlay = mp.create_osd_overlay("ass-events")
-overlay.z = 200  -- Top layer above everything
-local loading_active = false
-local steps_state = {
-  verified = false,
-  subtitles = false,
-  buffering = true,
-}
-local media_title = ""
-local start_time = 0
+local timer = nil
+local start_us = nil
+local visible = false
+local last_text = ""
+local base_w, base_h = 1920, 1080
 
--- Neon green #4ADE80, dark studio #0E1014
-local NEON_GREEN = "#4ADE80"
-local TEXT_WHITE = "#FFFFFF"
-local TEXT_MUTED = "#888888"
-
--- Pulse animation for buffering step
-local pulse_timer = nil
-local pulse_state = 0
-
--- ASS colours are &HBBGGRR&, not #RRGGBB.
-local function ass_color(hex)
-  local r, g, b = hex:match("^#(%x%x)(%x%x)(%x%x)$")
-  if not r then return "&HFFFFFF&" end
-  return "&H" .. b .. g .. r .. "&"
+local function clamp(v, lo, hi)
+    if v < lo then return lo end
+    if v > hi then return hi end
+    return v
 end
 
--- Strip ASS override braces from untrusted text (media titles, errors).
-local function ass_text(s)
-  return (tostring(s or ""):gsub("[{}]", ""):gsub("\n", " "))
+local function ease_out(t)
+    t = clamp(t, 0, 1)
+    return 1 - (1 - t) * (1 - t)
 end
 
-local function format_time(seconds)
-  if not seconds or seconds <= 0 then return "0:00" end
-  local h = math.floor(seconds / 3600)
-  local m = math.floor((seconds % 3600) / 60)
-  local s = math.floor(seconds % 60)
-  if h > 0 then
-    return string.format("%d:%02d:%02d", h, m, s)
-  else
-    return string.format("%d:%02d", m, s)
-  end
+local function ass_color(rgb, alpha)
+    alpha = clamp(alpha or 0, 0, 255)
+    return string.format("{\\1c&H%s&\\3c&H%s&\\alpha&H%02X&}", rgb, rgb, alpha)
 end
 
-local function step_line(done, active_text, done_text)
-  local color = done and NEON_GREEN or TEXT_MUTED
-  local icon = done and "✓" or "•"
-  return string.format("{\\an7\\fs20\\b0\\bord0\\shad0\\1c%s}%s  %s",
-    ass_color(color), icon, done and done_text or active_text)
+local function ass_border(rgb, border, alpha)
+    alpha = clamp(alpha or 0, 0, 255)
+    return string.format("{\\bord%.2f\\1c&H%s&\\3c&H%s&\\alpha&H%02X&\\3a&H%02X&}", border, rgb, rgb, alpha, alpha)
 end
 
-local function build_ass()
-  local title = media_title ~= "" and media_title or "Connecting stream..."
-  local resume_text = ""
-  if start_time > 0 then
-    resume_text = string.format("  {\\1c%s}▸ Resume at %s", ass_color(NEON_GREEN), format_time(start_time))
-  end
-  local lines = {
-    string.format("{\\an7\\fs36\\b1\\bord0\\shad0\\1c%s}%s%s", ass_color(TEXT_WHITE), ass_text(title), resume_text),
-    string.format("{\\an7\\fs18\\b0\\bord0\\shad0\\1c%s}Enhanced MPV", ass_color(TEXT_MUTED)),
-    "",
-    step_line(steps_state.verified, "Verifying stream & headers...", "Stream & headers verified"),
-    step_line(steps_state.subtitles, "Linking subtitles & audio...", "Subtitles & audio linked"),
-    string.format("{\\an7\\fs20\\b0\\bord0\\shad0\\1c%s}•  Buffering first frame%s",
-      ass_color(NEON_GREEN), string.rep(".", pulse_state)),
-  }
-  return table.concat(lines, "\n")
-end
-
--- Requested resume point (--start / loadfile start option), e.g. "+42" or "42".
-local function requested_start()
-  local raw = mp.get_property("start") or ""
-  local n = tonumber((raw:gsub("^%+", "")))
-  return n or 0
-end
-
-local function show_loading()
-  if loading_active then return end
-  loading_active = true
-  steps_state = { verified = false, subtitles = false, buffering = true }
-  media_title = mp.get_property("media-title") or ""
-  start_time = requested_start()
-
-  overlay.data = build_ass()
-  overlay:update()
-
-  -- Start pulse animation for buffering step
-  pulse_state = 0
-  pulse_timer = mp.add_periodic_timer(0.5, function()
-    pulse_state = (pulse_state % 3) + 1
-    if loading_active then
-      overlay.data = build_ass()
-      overlay:update()
-    else
-      pulse_timer:stop()
+local function update_base()
+    local w, h = mp.get_osd_size()
+    if w and h and w > 0 and h > 0 then
+        base_w, base_h = w, h
     end
-  end)
 end
 
-local function update_step(step, value)
-  if step == "verified" then steps_state.verified = value
-  elseif step == "subtitles" then steps_state.subtitles = value
-  elseif step == "buffering" then steps_state.buffering = value end
-  if loading_active then
-    overlay.data = build_ass()
-    overlay:update()
-  end
+local function ass_pos(x, y)
+    local px = math.floor(x * base_w / 1920 + 0.5)
+    local py = math.floor(y * base_h / 1080 + 0.5)
+    return string.format("{\\pos(%d,%d)}", px, py)
 end
 
-local function hide_loading()
-  if not loading_active then return end
-  loading_active = false
-  if pulse_timer then pulse_timer:stop() end
-  overlay.data = ""
-  overlay:update()
+local function safe_text(value, fallback)
+    value = tostring(value or ""):gsub("[\r\n]+", " "):gsub("{", ""):gsub("}", "")
+    value = value:gsub("^%s+", ""):gsub("%s+$", "")
+    if value == "" then return fallback end
+    if #value > 72 then value = value:sub(1, 69) .. "..." end
+    return value
 end
 
-local function show_error(message)
-  if not loading_active then return end
-  loading_active = false
-  if pulse_timer then pulse_timer:stop() end
-
-  local ass = table.concat({
-    string.format("{\\an5\\fs36\\b1\\bord0\\shad0\\1c%s}Stream failed to load", ass_color(NEON_GREEN)),
-    string.format("{\\an5\\fs20\\b0\\bord0\\shad0\\1c%s}%s", ass_color(TEXT_MUTED), ass_text(message)),
-    string.format("{\\an5\\fs18\\b0\\bord0\\shad0\\1c%s}Press Fallback in the extension or try again", ass_color(TEXT_MUTED)),
-  }, "\n")
-
-  overlay.data = ass
-  overlay:update()
+local function media_title()
+    local forced = mp.get_property("force-media-title")
+    if forced and forced ~= "" and not forced:match("^https?://") then return forced end
+    local title = mp.get_property("media-title")
+    if title and title ~= "" and not title:match("^https?://") then return title end
+    local filename = mp.get_property("filename/no-ext")
+    if filename and filename ~= "" then return filename end
+    return "Enhanced MPV"
 end
 
--- Show loading card IMMEDIATELY on script initialization (~80ms)
--- Don't wait for start-file event
-show_loading()
+local function quality_pill()
+    local h = mp.get_property_number("height", 0)
+    local fps = mp.get_property_number("container-fps", 0)
+    local vcodec = mp.get_property("video-codec") or ""
+    local codec = "VIDEO"
+    if vcodec:match("av01") or vcodec:lower():match("av1") then codec = "AV1"
+    elseif vcodec:match("hev") or vcodec:match("265") then codec = "HEVC"
+    elseif vcodec:match("avc") or vcodec:match("264") then codec = "H264"
+    elseif vcodec:match("vp9") then codec = "VP9"
+    elseif vcodec:match("vp8") then codec = "VP8"
+    end
+    local parts = {}
+    if h > 0 then parts[#parts + 1] = tostring(math.floor(h + 0.5)) .. "p" end
+    if fps > 0 then parts[#parts + 1] = string.format("%.0ffps", fps) end
+    parts[#parts + 1] = codec
+    return table.concat(parts, "  ")
+end
 
--- Event handlers
-mp.register_event("start-file", function()
-  show_loading()
-end)
+local function cache_fraction()
+    local demux = mp.get_property_number("demuxer-cache-duration", 0) or 0
+    local cache = mp.get_property_number("cache-buffering-state", 0) or 0
+    if cache > 0 then return clamp(cache / 100, 0, 1) end
+    return clamp(demux / 8, 0, 1)
+end
+
+local function render(now_us)
+    if not visible or not start_us then return end
+    update_base()
+
+    local elapsed_ms = (now_us - start_us) / 1000
+    local total_ms = math.max(400, tonumber(opts.duration_ms) or 1200)
+    local fade_ms = clamp(tonumber(opts.fade_ms) or 260, 60, total_ms)
+    local fade_start = total_ms - fade_ms
+    local alpha = 0
+    if elapsed_ms >= total_ms then
+        overlay.data = ""
+        overlay:remove()
+        visible = false
+        last_text = ""
+        if timer then timer:kill(); timer = nil end
+        return
+    elseif elapsed_ms > fade_start then
+        alpha = math.floor(255 * clamp((elapsed_ms - fade_start) / fade_ms, 0, 1))
+    end
+
+    local t = elapsed_ms / 1000
+    local intro = ease_out(elapsed_ms / 350)
+    local pulse = 0.5 + 0.5 * math.sin(t * 4.8)
+    local spin = t * 220
+    local cache = cache_fraction()
+
+    local a = assdraw.ass_new()
+    -- Dark studio backdrop
+    a:new_event()
+    a:pos(0, 0)
+    a:append(string.format("{\\an7\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", BG, alpha))
+    a:draw_start()
+    a:rect_cw(0, 0, 1920, 1080)
+    a:draw_stop()
+
+    -- Center ring glow
+    local cx, cy, r = 960, 470, 78
+    a:new_event()
+    a:pos(0, 0)
+    a:append(string.format("{\\an7\\bord10\\shad0\\1a&HFF&\\3c&H%s&\\3a&H%02X&}", GREEN, clamp(alpha + 170 - math.floor(pulse * 30), 0, 255)))
+    a:draw_start()
+    a:round_rect_cw(cx - r, cy - r, cx + r, cy + r, r)
+    a:draw_stop()
+
+    -- Ring track
+    a:new_event()
+    a:pos(0, 0)
+    a:append(string.format("{\\an7\\bord4\\shad0\\1a&HFF&\\3c&H%s&\\3a&H%02X&}", GREEN_DIM, clamp(alpha + 90, 0, 255)))
+    a:draw_start()
+    a:round_rect_cw(cx - r, cy - r, cx + r, cy + r, r)
+    a:draw_stop()
+
+    -- Spinning arc segments
+    for i = 0, 2 do
+        local ang = math.rad(spin + i * 120)
+        local x1 = cx + math.cos(ang) * r
+        local y1 = cy + math.sin(ang) * r
+        local x2 = cx + math.cos(ang + 0.85) * r
+        local y2 = cy + math.sin(ang + 0.85) * r
+        a:new_event()
+        a:pos(0, 0)
+        a:append(string.format("{\\an7\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", GREEN, clamp(alpha + 20, 0, 255)))
+        a:draw_start()
+        a:move_to(math.floor(x1), math.floor(y1))
+        a:line_to(math.floor(x2), math.floor(y2))
+        a:line_to(math.floor(x2 + math.cos(ang + 0.42) * 5), math.floor(y2 + math.sin(ang + 0.42) * 5))
+        a:line_to(math.floor(x1 + math.cos(ang + 0.42) * 5), math.floor(y1 + math.sin(ang + 0.42) * 5))
+        a:draw_stop()
+    end
+
+    -- Waveform bars
+    local bars, bw, gap, baseY = 21, 10, 6, 565
+    local startX = cx - ((bars * bw + (bars - 1) * gap) / 2)
+    for i = 0, bars - 1 do
+        local phase = t * 7 + i * 0.45
+        local h = 10 + (math.sin(phase) * 0.5 + 0.5) * 34 * intro
+        local x = startX + i * (bw + gap)
+        local barAlpha = clamp(alpha + math.floor((1 - math.abs(i - bars / 2) / (bars / 2)) * 30), 0, 255)
+        a:new_event()
+        a:pos(0, 0)
+        a:append(string.format("{\\an7\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", (i % 4 == 0) and GREEN or GREEN_DIM, barAlpha))
+        a:draw_start()
+        a:round_rect_cw(math.floor(x), math.floor(baseY - h), math.floor(x + bw), math.floor(baseY + h), 3)
+        a:draw_stop()
+    end
+
+    -- Title
+    a:new_event()
+    a:append(ass_pos(960, 650))
+    a:append(string.format("{\\an5\\fs44\\bord0\\shad0\\fnmpv-osd-symbols\\1c&H%s&\\alpha&H%02X&}", TEXT, alpha))
+    a:append(safe_text(media_title(), "Enhanced MPV"))
+
+    -- Quality/codec pill
+    local pill = safe_text(quality_pill(), "VIDEO")
+    local pillW = clamp(220 + #pill * 8, 260, 560)
+    local pillX, pillY = 960 - pillW / 2, 690
+    a:new_event()
+    a:pos(0, 0)
+    a:append(string.format("{\\an7\\bord1\\shad0\\1c&H%s&\\3c&H%s&\\alpha&H%02X&\\3a&H%02X&}", PANEL, GREEN_DIM, clamp(alpha + 20, 0, 255), clamp(alpha + 40, 0, 255)))
+    a:draw_start()
+    a:round_rect_cw(math.floor(pillX), pillY, math.floor(pillX + pillW), pillY + 40, 20)
+    a:draw_stop()
+    a:new_event()
+    a:append(ass_pos(960, 710))
+    a:append(string.format("{\\an5\\fs24\\bord0\\shad0\\fnmpv-osd-symbols\\1c&H%s&\\alpha&H%02X&}", GREEN, alpha))
+    a:append(pill)
+
+    -- Cache bar
+    local barW, barH = 420, 6
+    local barX, barY = 960 - barW / 2, 760
+    a:new_event()
+    a:pos(0, 0)
+    a:append(string.format("{\\an7\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", "243041", clamp(alpha + 30, 0, 255)))
+    a:draw_start()
+    a:round_rect_cw(barX, barY, barX + barW, barY + barH, 3)
+    a:draw_stop()
+    a:new_event()
+    a:pos(0, 0)
+    a:append(string.format("{\\an7\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", GREEN, alpha))
+    a:draw_start()
+    a:round_rect_cw(barX, barY, barX + math.floor(barW * clamp(cache, 0.06, 1)), barY + barH, 3)
+    a:draw_stop()
+    a:new_event()
+    a:append(ass_pos(960, 782))
+    a:append(string.format("{\\an5\\fs18\\bord0\\shad0\\fnmpv-osd-symbols\\1c&H%s&\\alpha&H%02X&}", MUTED, clamp(alpha + 20, 0, 255)))
+    a:append("LOADING STREAM")
+
+    local text = a.text
+    if text ~= last_text then
+        overlay.res_x = 1920
+        overlay.res_y = 1080
+        overlay.data = text
+        overlay:update()
+        last_text = text
+    end
+end
+
+local function stop_overlay()
+    if timer then timer:kill(); timer = nil end
+    visible = false
+    start_us = nil
+    last_text = ""
+    overlay.data = ""
+    overlay:remove()
+end
+
+local function start_overlay()
+    stop_overlay()
+    visible = true
+    start_us = mp.get_time() * 1000000
+    render(start_us)
+    timer = mp.add_periodic_timer(1 / 60, function()
+        render(mp.get_time() * 1000000)
+    end)
+end
 
 mp.register_event("file-loaded", function()
-  -- Stream & headers verified immediately on file-loaded
-  update_step("verified", true)
+    start_overlay()
 end)
 
-mp.observe_property("track-list", "native", function(_, tracks)
-  if not loading_active then return end
-  if tracks and #tracks > 0 then
-    local has_audio = false
-    local has_sub = false
-    for _, t in ipairs(tracks) do
-      if t.type == "audio" and t.selected then has_audio = true end
-      if t.type == "sub" and t.selected then has_sub = true end
+mp.observe_property("video-out-params", "native", function(_, value)
+    if visible and value then
+        stop_overlay()
     end
-    if has_audio or has_sub then
-      update_step("subtitles", true)
-    end
-  end
 end)
 
-mp.register_event("playback-restart", function()
-  -- First frame ready - clear overlay immediately
-  hide_loading()
-end)
-
--- Clear buffering step as soon as video output parameters are available
--- (first frame decoded), which happens before playback-restart in some cases.
-mp.observe_property("video-out-params", "native", function(_, params)
-  if not loading_active then return end
-  if params then
-    update_step("buffering", false)
-  end
-end)
-
-mp.register_event("end-file", function(event)
-  -- Only real failures show the error card; "stop" (loadfile replace),
-  -- "redirect" (yt-dlp playlists), "eof", and "quit" are normal transitions.
-  if event and event.reason == "error" then
-    show_error(event.file_error or "unknown error")
-  else
-    hide_loading()
-  end
-end)
-
-mp.observe_property("idle-active", "bool", function(_, idle)
-  if idle then
-    hide_loading()
-  end
-end)
-
-msg.info("loading-screen.lua loaded")
+mp.register_event("end-file", stop_overlay)
+mp.register_event("shutdown", stop_overlay)

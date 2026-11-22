@@ -27,7 +27,6 @@ local ICON_SMALL = 0
 local ICON_BIG = 1
 local IMAGE_ICON = 1
 local LR_LOADFROMFILE = 0x00000010
-local LR_DEFAULTSIZE = 0x00000040
 
 -- Window show/restore/foreground constants
 local SW_RESTORE = 9
@@ -59,6 +58,7 @@ local declared = pcall(function()
     int SetWindowPos(void* hWnd, void* hWndInsertAfter, int X, int Y,
                      int cx, int cy, unsigned int uFlags);
     int SetForegroundWindow(void* hWnd);
+    unsigned int GetCurrentProcessId(void);
     unsigned long GetWindowThreadProcessId(void* hWnd, void* lpdwProcessId);
     int EnumWindows(void* lpEnumFunc, void* lParam);
     int IsWindowVisible(void* hWnd);
@@ -79,7 +79,8 @@ local loaded_dwmapi, dwmapi = pcall(ffi.load, "dwmapi")
 -- dwmapi may not be available on older Windows; we fail silently if so.
 
 local self_pid = tonumber(kernel32.GetCurrentProcessId())
-local cached_icon = nil
+local cached_icon_small = nil
+local cached_icon_big = nil
 local cached_icon_path = nil
 local dwm_applied = false
 local window_revealed = false
@@ -186,14 +187,17 @@ end
 
 local function apply_icon(hwnd, path)
   if path ~= cached_icon_path then
-    cached_icon = user32.LoadImageW(
-      nil, wide(path), IMAGE_ICON, 0, 0, LR_LOADFROMFILE + LR_DEFAULTSIZE)
+    cached_icon_small = user32.LoadImageW(nil, wide(path), IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+    cached_icon_big = user32.LoadImageW(nil, wide(path), IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
     cached_icon_path = path
   end
-  if cached_icon == nil then return end
   local h = ffi.cast("void*", hwnd)
-  user32.SendMessageW(h, WM_SETICON, ICON_BIG, cached_icon)
-  user32.SendMessageW(h, WM_SETICON, ICON_SMALL, cached_icon)
+  if cached_icon_big ~= nil then
+    user32.SendMessageW(h, WM_SETICON, ICON_BIG, cached_icon_big)
+  end
+  if cached_icon_small ~= nil then
+    user32.SendMessageW(h, WM_SETICON, ICON_SMALL, cached_icon_small)
+  end
 end
 
 -- Apply DWM dark titlebar (#0E1014) and neon-green border (#4ADE80) on Windows 11

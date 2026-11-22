@@ -19,7 +19,9 @@ const {
   ytdlSupported,
   joinHeaderFields,
 } = require("./sanitizer");
-const { startRelay } = require("./stream-relay");
+const { startRelay, startMasterRelay } = require("./stream-relay");
+
+let relayInProcess = false;
 
 const RELAY_URL_RE = /^http:\/\/127\.0\.0\.1:\d+\/[a-f0-9]+\/(?:[a-z]+\/)?(index\.m3u8|master\.m3u8)/i;
 
@@ -713,86 +715,113 @@ async function attachSubtitlesWhenReady(files, target) {
   }
 }
 
-function relayDaemonCommand() {
-  const isNode = /^node(?:\.exe)?$/i.test(path.basename(process.execPath));
-  return isNode
-    ? { bin: process.execPath, args: [path.join(__dirname, "index.js"), "--relay-daemon"] }
-    : { bin: process.execPath, args: ["--relay-daemon"] };
+function setRelayInProcess(value) {
+  relayInProcess = Boolean(value);
 }
 
-// Browsers terminate a one-shot native-messaging host right after it replies,
- // which would take an in-process relay (and mpv's stream) down with it. Run
- // the relay in a detached helper that exits on its own once mpv stops using
- // it; fall back to an in-process relay if the helper cannot start.
- function startRelayDaemon(request, timeoutMs) {
-   return new Promise((resolve, reject) => {
-     const { bin, args } = relayDaemonCommand();
-     let child;
-     try {
-       // On Windows, use stdio: ["pipe", "pipe", "pipe"] so stderr is also captured
-       // and the detached process can survive parent exit. On Unix, "ignore" for stderr is fine.
-       const stdio = process.platform === "win32" ? ["pipe", "pipe", "pipe"] : ["pipe", "pipe", "ignore"];
-       child = spawn(bin, args, { detached: true, stdio, windowsHide: true });
-     } catch (err) {
-       reject(err);
-       return;
-     }
-     let out = "";
-     let settled = false;
-     const done = (err, value) => {
-       if (settled) return;
-       settled = true;
-       clearTimeout(timer);
-       try { child.stdin.end(); } catch { /* ignore */ }
-       try { child.stdout.destroy(); } catch { /* ignore */ }
-       if (process.platform !== "win32") {
-         try { child.stderr.destroy(); } catch { /* ignore */ }
-       }
-       child.unref();
-       if (err) {
-         try { child.kill(); } catch { /* ignore */ }
-         reject(err);
-       } else {
-         resolve(value);
-       }
-     };
-     const timer = setTimeout(() => done(new Error("relay daemon timeout")), timeoutMs || 5000);
-     child.on("error", (err) => done(err));
-     child.on("exit", (code) => {
-       if (!settled) done(new Error("relay daemon exited with code " + code));
-     });
-     child.stdout.on("data", (d) => {
-       out += d.toString("utf8");
-       const nl = out.indexOf("\n");
-       if (nl < 0) return;
-       try {
-         const reply = JSON.parse(out.slice(0, nl));
-         if (reply && reply.ok) done(null, reply);
-         else done(new Error((reply && reply.error) || "relay daemon failed"));
-       } catch (err) {
-         done(err);
-       }
-     });
-     child.stdin.write(JSON.stringify(request) + "\n");
-   });
- }
+function relayDaemonCommand(configPath) {
+  const isNode = !process.pkg && /^node(?:\.exe)?$/i.test(path.basename(process.execPath));
+  const args = ["--relay-config", configPath];
+  if (isNode) args.unshift(path.join(__dirname, "index.js"));
+  return { bin: process.execPath, args };
+}
+
+function startRelayDaemon(request, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    ensureDir(configDir());
+    const id = crypto.randomBytes(8).toString("hex");
+    const configPath = path.join(os.tmpdir(), "enhanced-mpv-relay-" + id + ".json");
+    const resultPath = path.join(os.tmpdir(), "enhanced-mpv-relay-" + id + ".result.json");
+    const cleanup = () => {
+      for (const p of [configPath, resultPath]) {
+        try { fs.unlinkSync(p); } catch { /* no file */ }
+      }
+    };
+    let child;
+    let timer = null;
+    let poller = null;
+    let settled = false;
+    const readResult = () => {
+      try {
+        return JSON.parse(fs.readFileSync(resultPath, "utf8"));
+      } catch {
+        return null;
+      }
+    };
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (poller) clearInterval(poller);
+      cleanup();
+      if (err) {
+        const message = String((err && err.message) || err);
+        appendLaunchLog("[" + new Date().toISOString() + "] relay daemon error: " + message);
+        try { child.kill(); } catch { /* already gone */ }
+        reject(err);
+      } else {
+        try { child.unref(); } catch { /* ignore */ }
+        resolve(value);
+      }
+    };
+    const check = () => {
+      const reply = readResult();
+      if (!reply) return;
+      if (reply.ok) finish(null, reply);
+      else finish(new Error(reply.error || "relay daemon failed"));
+    };
+    try {
+      fs.writeFileSync(configPath, JSON.stringify({ ...request, resultPath }), { encoding: "utf8", mode: 0o600 });
+    } catch (err) {
+      cleanup();
+      reject(err);
+      return;
+    }
+    try {
+      const command = relayDaemonCommand(configPath);
+      child = spawn(command.bin, command.args, { detached: true, stdio: "ignore", windowsHide: true });
+    } catch (err) {
+      cleanup();
+      reject(err);
+      return;
+    }
+    child.on("error", (err) => finish(err));
+    child.on("exit", (code) => {
+      setTimeout(() => {
+        if (settled) return;
+        if (readResult()) check();
+        else finish(new Error("relay daemon exited with code " + code));
+      }, 50);
+    });
+    poller = setInterval(check, 20);
+    timer = setTimeout(() => finish(new Error("relay daemon timeout")), timeoutMs || 5000);
+  });
+}
 
 async function relaySingle(url, headers) {
   try {
+    if (relayInProcess) return await startRelay(url, headers);
     const reply = await startRelayDaemon({ kind: "single", url, headers });
     return reply.relayUrl;
   } catch (err) {
-    appendLaunchLog("[" + new Date().toISOString() + "] relay daemon unavailable, using in-process relay: " + String(err.message || err));
+    const message = String((err && err.message) || err);
+    appendLaunchLog("[" + new Date().toISOString() + "] relay failed: " + message);
+    if (relayInProcess) throw err;
     return startRelay(url, headers);
   }
 }
 
 async function relayMaster(videoUrl, videoHeaders, audioUrl, audioHeaders) {
   try {
+    if (relayInProcess) {
+      const result = await startMasterRelay(videoUrl, videoHeaders, audioUrl, audioHeaders);
+      return result.masterRelayUrl;
+    }
     const reply = await startRelayDaemon({ kind: "master", videoUrl, videoHeaders, audioUrl, audioHeaders });
     return reply.masterRelayUrl;
   } catch (err) {
-    appendLaunchLog("[" + new Date().toISOString() + "] master relay failed: " + String(err.message || err));
+    const message = String((err && err.message) || err);
+    appendLaunchLog("[" + new Date().toISOString() + "] master relay failed: " + message);
     throw err;
   }
 }
@@ -806,29 +835,11 @@ function headerObject(fields) {
   return out;
 }
 
-async function play(payload, mode) {
+async function prepareLaunch(payload, localSubFiles, mpvBin, mode) {
   const url = payload && payload.url;
-  if (!isSafeUrl(url) && !(url && isSafeLocalPath(url) && !String(url).includes("://"))) {
-    return { ok: false, error: "Rejected URL", code: "BAD_URL", command: [] };
-  }
-  const mpvBin = resolveMpvBin();
-  if (!mpvBin) {
-    return { ok: false, error: "mpv was not found on PATH", code: "MPV_NOT_FOUND", command: [] };
-  }
   const cfg = readConfig();
-  const wantQueue = (mode || payload.action || cfg.queueMode || "replace") === "queue";
-  setTimeout(cleanStaleTempSubs, 0);
-  const subtitleFilesPromise = materializeSubtitles(payload).catch((err) => {
-    appendLaunchLog("[" + new Date().toISOString() + "] subtitle download failed: " +
-      String((err && err.message) || err));
-    return [];
-  });
-  const localSubFiles = Array.isArray(payload.subtitleFiles)
-    ? payload.subtitleFiles.filter(isSafeLocalPath)
-    : [];
-
-  // Split HLS video + audio behind auth: relay both through localhost so every
-  // playlist, key, init segment, and media segment carries the tab's headers.
+  const queueHint = mode || (payload && payload.action) || cfg.queueMode || "replace";
+  const wantQueue = queueHint === "queue";
   const audioUrl = payload.audioUrl && isSafeUrl(payload.audioUrl) ? payload.audioUrl : null;
   const audioAuth = authHeaderObject(payload.audioHeaders);
   const videoHeaders = headerFields(payload);
@@ -848,12 +859,13 @@ async function play(payload, mode) {
   if (videoIsHls && audioIsHls && (needsVideoRelay || needsAudioRelay)) {
     try {
       const masterRelayUrl = await relayMaster(url, headerObject(videoHeaders), audioUrl, audioAuth);
-      appendLaunchLog("[" + new Date().toISOString() + "] started master relay: " + masterRelayUrl);
       launchPayload.url = masterRelayUrl;
       launchPayload.isMasterRelay = true;
+      appendLaunchLog("[" + new Date().toISOString() + "] started master relay: " + masterRelayUrl);
     } catch (err) {
-      appendLaunchLog("[" + new Date().toISOString() + "] master relay failed, cannot play protected stream: " + String(err));
-      return { ok: false, error: "Failed to start authenticated relay for split HLS stream", code: "RELAY_FAILED", command: [] };
+      const detail = String((err && err.message) || err);
+      appendLaunchLog("[" + new Date().toISOString() + "] Failed to start authenticated relay for split HLS stream: " + detail);
+      return { failure: { ok: false, error: "Failed to start authenticated relay for split HLS stream: " + detail, code: "RELAY_FAILED", command: [] } };
     }
   } else if (needsAudioRelay) {
     try {
@@ -866,13 +878,32 @@ async function play(payload, mode) {
   }
 
   const args = buildArgs(launchPayload, localSubFiles, mpvBin);
-  const command = publicCommand(mpvBin, args);
+  return { launchPayload, args, command: publicCommand(mpvBin, args), wantQueue };
+}
+
+async function play(payload, mode) {
+  const url = payload && payload.url;
+  if (!isSafeUrl(url) && !(url && isSafeLocalPath(url) && !String(url).includes("://"))) {
+    return { ok: false, error: "Rejected URL", code: "BAD_URL", command: [] };
+  }
+  const mpvBin = resolveMpvBin();
+  if (!mpvBin) {
+    return { ok: false, error: "mpv was not found on PATH", code: "MPV_NOT_FOUND", command: [] };
+  }
+  setTimeout(cleanStaleTempSubs, 0);
+  const subtitleFilesPromise = materializeSubtitles(payload).catch((err) => {
+    appendLaunchLog("[" + new Date().toISOString() + "] subtitle download failed: " +
+      String((err && err.message) || err));
+    return [];
+  });
+  const localSubFiles = Array.isArray(payload.subtitleFiles)
+    ? payload.subtitleFiles.filter(isSafeLocalPath)
+    : [];
+  const prepared = await prepareLaunch(payload, localSubFiles, mpvBin, mode);
+  if (prepared.failure) return prepared.failure;
+  const { launchPayload, args, command, wantQueue } = prepared;
   ensureDir(configDir());
 
-  // Single instance: a live window always takes the new video via IPC
-  // (loadfile replace + unpause + bring-to-front). If it does not answer
-  // correctly it is terminated so the fresh spawn never leaves the previous
-  // video frozen on screen.
   if (await ipcAlive()) {
     const target = liveIpc || ipcPath();
     try {
@@ -886,7 +917,6 @@ async function play(payload, mode) {
       await terminateMpv(target);
     }
   } else {
-    // No IPC answer: any recorded instance is hung (or already gone).
     await terminateMpv(null);
   }
 
@@ -906,6 +936,75 @@ async function play(payload, mode) {
       code: classifyError(err.message),
       command,
     };
+  }
+}
+
+async function fastDispatch(payload, mode) {
+  const url = payload && payload.url;
+  if (!isSafeUrl(url) && !(url && isSafeLocalPath(url) && !String(url).includes("://"))) {
+    return { ok: false, error: "Rejected URL", code: "BAD_URL", command: [] };
+  }
+  const mpvBin = resolveMpvBin();
+  if (!mpvBin) {
+    return { ok: false, error: "mpv was not found on PATH", code: "MPV_NOT_FOUND", command: [] };
+  }
+  const startedAt = Date.now();
+  try {
+    const prepared = await prepareLaunch(payload, [], mpvBin, mode);
+    if (prepared.failure) return prepared.failure;
+    const { launchPayload, args, command, wantQueue } = prepared;
+    if (!(await ipcAlive())) {
+      appendLaunchLog("[" + new Date().toISOString() + "] fast dispatch: no live IPC, using full launch");
+      return play(payload, mode);
+    }
+    const target = liveIpc || ipcPath();
+    const plan = loadfilePlan(args);
+    if (plan.profile) void sendIpc(["apply-profile", plan.profile], target, 300).catch(() => {});
+    if (plan.lavfAppend) void sendIpc(["change-list", "demuxer-lavf-o", "append", plan.lavfAppend], target, 300).catch(() => {});
+    void sendIpc(["change-list", "audio-files", "clr", ""], target, 300).catch(() => {});
+    void sendIpc(["change-list", "sub-files", "clr", ""], target, 300).catch(() => {});
+    const options = { ...(plan.options || {}) };
+    const start = (payload.startTimeSource && payload.startTimeSource !== "none")
+      ? Math.floor(payload.startTime)
+      : resumeStart(payload.startTime, payload.duration);
+    options.start = start > 0 ? String(start) : "none";
+    const dispatchedAt = Date.now();
+    const r = await sendIpc(["loadfile", launchPayload.url, wantQueue ? "append-play" : "replace", -1, options], target, 1200);
+    if (!r || r.error !== "success") {
+      throw new Error("ipc loadfile rejected: " + String(r && r.error));
+    }
+    const dispatchMs = Date.now() - dispatchedAt;
+    if (!wantQueue) {
+      void Promise.allSettled([
+        sendIpc(["set_property", "pause", false], target, 300),
+        sendIpc(["set_property", "force-window", "yes"], target, 300),
+        sendIpc(["set_property", "window-minimized", false], target, 300),
+        sendScriptMessage("bring-to-front", target),
+      ]);
+    }
+    void materializeSubtitles(payload)
+      .then((files) => attachSubtitlesWhenReady(files, target))
+      .catch((err) => {
+        appendLaunchLog("[" + new Date().toISOString() + "] subtitle attach failed: " +
+          String((err && err.message) || err));
+      });
+    const totalMs = Date.now() - startedAt;
+    appendLaunchLog("[" + new Date().toISOString() + "] fast_ipc_dispatch_ms=" + dispatchMs + " total_ms=" + totalMs);
+    return {
+      ok: true,
+      error: null,
+      code: "OK",
+      command,
+      queued: wantQueue,
+      reused: true,
+      fast: true,
+      dispatchMs,
+      totalMs,
+    };
+  } catch (err) {
+    appendLaunchLog("[" + new Date().toISOString() + "] fast dispatch failed: " +
+      String((err && err.message) || err) + "; using full launch");
+    return play(payload, mode);
   }
 }
 
@@ -957,6 +1056,11 @@ async function attachAudio(payload) {
 
 module.exports = {
   play,
+  fastDispatch,
+  appendLaunchLog,
+  setRelayInProcess,
+  startRelayDaemon,
+  relayMaster,
   findMpv: resolveMpvBin,
   buildArgs,
   isNativeMpv,
