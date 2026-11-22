@@ -141,6 +141,57 @@ function makeIco(entries) {
   return Buffer.concat([header, dir, ...images]);
 }
 
+// Inno Setup wizard bitmaps: dark studio (#0D1117) + neon green (#4ADE80)
+const DARK_STUDIO = [13, 17, 23];       // #0D1117
+const NEON_GREEN = [74, 222, 128];      // #4ADE80
+
+function makeBmp(width, height, drawFn) {
+  // 24-bit BMP, bottom-up, no compression
+  const rowSize = Math.floor((width * 3 + 3) / 4) * 4;
+  const pixelData = Buffer.alloc(rowSize * height);
+  for (let y = 0; y < height; y++) {
+    const row = height - 1 - y; // BMP is bottom-up
+    for (let x = 0; x < width; x++) {
+      const color = drawFn(x, y, width, height);
+      const idx = row * rowSize + x * 3;
+      pixelData[idx] = color[2];     // B
+      pixelData[idx + 1] = color[1]; // G
+      pixelData[idx + 2] = color[0]; // R
+    }
+  }
+  const fileHeader = Buffer.alloc(14);
+  fileHeader.writeUInt16LE(0x4D42, 0); // "BM"
+  fileHeader.writeUInt32LE(14 + 40 + pixelData.length, 2); // file size
+  fileHeader.writeUInt32LE(0, 6); // reserved
+  fileHeader.writeUInt32LE(14 + 40, 10); // offset to pixel data
+  const infoHeader = Buffer.alloc(40);
+  infoHeader.writeUInt32LE(40, 0); // header size
+  infoHeader.writeInt32LE(width, 4);
+  infoHeader.writeInt32LE(height, 8);
+  infoHeader.writeUInt16LE(1, 12); // planes
+  infoHeader.writeUInt16LE(24, 14); // bits per pixel
+  infoHeader.writeUInt32LE(0, 16); // no compression
+  infoHeader.writeUInt32LE(pixelData.length, 20); // image size
+  infoHeader.writeInt32LE(2835, 24); // XPelsPerMeter (72 DPI)
+  infoHeader.writeInt32LE(2835, 28); // YPelsPerMeter
+  infoHeader.writeUInt32LE(0, 32); // colors used
+  infoHeader.writeUInt32LE(0, 36); // important colors
+  return Buffer.concat([fileHeader, infoHeader, pixelData]);
+}
+
+function drawWizardBanner(x, y, w, h) {
+  // 55x164: left sidebar with vertical neon green accent line
+  if (x < 4) return NEON_GREEN; // thin left accent bar
+  return DARK_STUDIO;
+}
+
+function drawWizardSmall(x, y, w, h) {
+  // 499x314: main wizard image with dark background, neon green title area
+  if (y < 60) return DARK_STUDIO; // top title area
+  if (y === 60) return NEON_GREEN; // separator line
+  return DARK_STUDIO;
+}
+
 function main() {
   const iconsDir = path.join(__dirname, "..", "browser-extension", "icons");
   fs.mkdirSync(iconsDir, { recursive: true });
@@ -154,6 +205,15 @@ function main() {
   const entries = sizes.map((size) => ({ size, data: makePng(size) }));
   fs.writeFileSync(path.join(assetsDir, "enhanced-mpv.ico"), makeIco(entries));
   console.log("Generated enhanced-mpv.ico with sizes: " + sizes.join(", "));
+
+  // Inno Setup wizard bitmaps
+  const banner = makeBmp(55, 164, drawWizardBanner);
+  fs.writeFileSync(path.join(assetsDir, "wizard-banner.bmp"), banner);
+  console.log("Generated wizard-banner.bmp (55x164)");
+
+  const small = makeBmp(499, 314, drawWizardSmall);
+  fs.writeFileSync(path.join(assetsDir, "wizard-small.bmp"), small);
+  console.log("Generated wizard-small.bmp (499x314)");
 }
 
 main();

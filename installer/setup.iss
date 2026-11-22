@@ -38,6 +38,8 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 SetupIconFile=..\assets\enhanced-mpv.ico
+WizardImageFile=..\assets\wizard-banner.bmp
+WizardSmallImageFile=..\assets\wizard-small.bmp
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
@@ -62,6 +64,8 @@ Source: "staging\manifests\*"; DestDir: "{app}\manifests"; Flags: ignoreversion
 Source: "staging\extension-id.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "staging\firefox\enhanced-mpv-firefox.xpi"; DestDir: "{app}\firefox"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "staging\mpv-config\*"; DestDir: "{app}\mpv"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Custom window/taskbar icon
+Source: "..\assets\enhanced-mpv.ico"; DestDir: "{app}\mpv"; Flags: ignoreversion
 
 ; --- on-demand dependencies (downloaded into {tmp} when winget is absent) --
 Source: "{tmp}\yt-dlp.exe"; DestDir: "{app}\bin"; Flags: external ignoreversion skipifsourcedoesntexist; Check: WantYtDlpArchiveFile
@@ -847,6 +851,8 @@ var
   RceditExitCode: Integer;
   MpvDir, MpvExe, YtdlExe, HookDir, HookFile: String;
   EnhancedMpvDir, EnhancedMpvExe, IconPath, RceditCache, ResultCode: String;
+  UserMpvDir, LocalMpvDir, LocalMpvExe, Ie4uinitPath: String;
+  Ie4uinitExitCode: Integer;
 begin
   MpvDir := ExpandConstant('{localappdata}\Programs\mpv');
   NormalizeMpvDir(MpvDir);
@@ -867,7 +873,25 @@ begin
   else
     MpvExe := '';
 
-// Create EnhancedMPV folder and copy mpv.exe there as enhanced-mpv.exe, then stamp the icon.
+  // Copy enhanced-mpv.ico to user mpv dir and local mpv dir for window-icon.lua
+  UserMpvDir := ExpandConstant('{userappdata}\mpv');
+  ForceDirectories(UserMpvDir);
+  IconPath := ExpandConstant('{app}\mpv\enhanced-mpv.ico');
+  if FileExists(IconPath) then
+  begin
+    if CopyFile(IconPath, AddBackslash(UserMpvDir) + 'enhanced-mpv.ico', False) then
+      Log('Copied enhanced-mpv.ico to ' + UserMpvDir);
+  end;
+
+  LocalMpvDir := ExpandConstant('{localappdata}\Programs\mpv');
+  ForceDirectories(LocalMpvDir);
+  if FileExists(IconPath) then
+  begin
+    if CopyFile(IconPath, AddBackslash(LocalMpvDir) + 'enhanced-mpv.ico', False) then
+      Log('Copied enhanced-mpv.ico to ' + LocalMpvDir);
+  end;
+
+  // Create EnhancedMPV folder and copy mpv.exe there as enhanced-mpv.exe, then stamp the icon.
   EnhancedMpvDir := ExpandConstant('{localappdata}\Programs\EnhancedMPV');
   ForceDirectories(EnhancedMpvDir);
   EnhancedMpvExe := AddBackslash(EnhancedMpvDir) + 'enhanced-mpv.exe';
@@ -878,7 +902,7 @@ begin
     if CopyFile(MpvExe, EnhancedMpvExe, False) then
     begin
       Log('Copied mpv to ' + EnhancedMpvExe);
-// Download rcedit-x64.exe from electron/rcedit releases if not cached.
+  // Download rcedit-x64.exe from electron/rcedit releases if not cached.
       RceditCache := AddBackslash(EnhancedMpvDir) + 'rcedit-x64.exe';
       if not FileExists(RceditCache) then
       begin
@@ -896,7 +920,6 @@ begin
       end;
       if FileExists(RceditCache) then
       begin
-        IconPath := ExpandConstant('{app}\mpv\enhanced-mpv.ico');
         if FileExists(IconPath) then
         begin
           Log('Stamping Enhanced MPV icon into ' + EnhancedMpvExe + '...');
@@ -904,9 +927,22 @@ begin
           if Exec(ExpandConstant('{cmd}'), '/c "' + RceditCache + '" "' + EnhancedMpvExe + '" --set-icon "' + IconPath + '"', '', SW_HIDE, ewWaitUntilTerminated, RceditExitCode) then
             ResultCode := IntToStr(RceditExitCode);
           if (ResultCode = '0') and FileExists(EnhancedMpvExe) then
-            Log('Icon stamped successfully.')
+            Log('Icon stamped successfully on enhanced-mpv.exe.')
           else
-            Log('rcedit failed (exit code ' + ResultCode + '); icon may not be applied.');
+            Log('rcedit failed (exit code ' + ResultCode + ') on enhanced-mpv.exe; icon may not be applied.');
+        end;
+        // Also stamp the local mpv.exe so window-icon.lua finds it directly
+        LocalMpvExe := FindMpvExeInDir(LocalMpvDir);
+        if (LocalMpvExe <> '') and FileExists(LocalMpvExe) and IsNativeMpv(LocalMpvExe) then
+        begin
+          Log('Stamping Enhanced MPV icon into ' + LocalMpvExe + '...');
+          ResultCode := '-1';
+          if Exec(ExpandConstant('{cmd}'), '/c "' + RceditCache + '" "' + LocalMpvExe + '" --set-icon "' + IconPath + '"', '', SW_HIDE, ewWaitUntilTerminated, RceditExitCode) then
+            ResultCode := IntToStr(RceditExitCode);
+          if (ResultCode = '0') and FileExists(LocalMpvExe) then
+            Log('Icon stamped successfully on local mpv.exe.')
+          else
+            Log('rcedit failed (exit code ' + ResultCode + ') on local mpv.exe; icon may not be applied.');
         end;
       end;
     end;
@@ -925,6 +961,14 @@ begin
     ForceDirectories(HookDir);
     SaveAsciiLines(HookFile, ['ytdl_path=' + YtdlExe]);
     Log('Pointed ytdl_hook at ' + YtdlExe);
+  end;
+
+  // Refresh Windows shell icon cache so the new icon appears immediately
+  Ie4uinitPath := ExpandConstant('{win}\System32\ie4uinit.exe');
+  if FileExists(Ie4uinitPath) then
+  begin
+    Log('Refreshing Windows shell icon cache...');
+    Exec(Ie4uinitPath, '-show', '', SW_HIDE, ewWaitUntilTerminated, Ie4uinitExitCode);
   end;
 end;
 
@@ -979,6 +1023,17 @@ end;
 
 procedure InitializeWizard;
 begin
+  // Dark studio theme: #0D1117 background, #4ADE80 neon green accent
+  // Note: TSetupForm.Color is not available; background is controlled by wizard bitmaps
+  WizardForm.Font.Color := $FFFFFF;
+  WizardForm.BeveledLabel.Color := $17110D;
+  WizardForm.BeveledLabel.Font.Color := $FFFFFF;
+  WizardForm.PageDescriptionLabel.Color := $171117; // slightly lighter
+  WizardForm.PageDescriptionLabel.Font.Color := $A8DE80; // dimmed neon green
+  WizardForm.PageNameLabel.Color := $17110D;
+  WizardForm.PageNameLabel.Font.Color := $80DE4A; // #4ADE80 in BGR
+  WizardForm.MainPanel.Color := $17110D;
+
   ProgressPage := CreateOutputProgressPage('Preparing dependencies',
     'Enhanced MPV is checking for mpv and yt-dlp. If they are missing they will be installed now.');
 

@@ -77,7 +77,7 @@ video-1080p.m3u8
 video-720p.m3u8`;
 
   const mediaM3U8 = `#EXTM3U
-#EXT-X-VERSION:3
+#EXT-X-VERSION:4
 #EXTINF:10,
 segment1.ts
 #EXTINF:10,
@@ -95,16 +95,16 @@ segment2.ts`;
 test("startMasterRelay synthesizes master manifest with video and audio", async () => {
   const { server: videoServer, url: videoBase } = await createM3U8Server(
     `#EXTM3U
-#EXT-X-VERSION:3
+#EXT-X-VERSION:4
 #EXTINF:10,
 seg1.ts
 #EXTINF:10,
 seg2.ts`
   );
   const { server: audioServer, url: audioBase } = await createM3U8Server(
-    "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:10,\naudio-seg.ts\n",
+    "#EXTM3U\n#EXT-X-VERSION:4\n#EXTINF:10,\naudio-seg.ts\n",
     `#EXTM3U
-#EXT-X-VERSION:3
+#EXT-X-VERSION:4
 #EXTINF:10,
 audio1.ts
 #EXTINF:10,
@@ -132,7 +132,7 @@ audio2.ts`
 
   // Verify master manifest structure
   assert.ok(masterManifest.includes("#EXTM3U"));
-  assert.ok(masterManifest.includes("#EXT-X-VERSION:3"));
+  assert.ok(masterManifest.includes("#EXT-X-VERSION:4"));
   assert.ok(masterManifest.includes('#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Default",DEFAULT=YES,AUTOSELECT=YES'));
   assert.ok(masterManifest.includes(`URI="${result.audioRelayUrl}"`));
   assert.ok(masterManifest.includes("#EXT-X-STREAM-INF:BANDWIDTH=8000000,AUDIO=\"audio\""));
@@ -147,16 +147,16 @@ audio2.ts`
 test("startMasterRelay video and audio sub-relays serve rewritten manifests", async () => {
   const { server: videoServer, url: videoBase } = await createM3U8Server(
     `#EXTM3U
-#EXT-X-VERSION:3
+#EXT-X-VERSION:4
 #EXTINF:10,
 seg1.ts
 #EXTINF:10,
 seg2.ts`
   );
   const { server: audioServer, url: audioBase } = await createM3U8Server(
-    "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:10,\naudio-seg.ts\n",
+    "#EXTM3U\n#EXT-X-VERSION:4\n#EXTINF:10,\naudio-seg.ts\n",
     `#EXTM3U
-#EXT-X-VERSION:3
+#EXT-X-VERSION:4
 #EXTINF:10,
 audio1.ts
 #EXTINF:10,
@@ -199,22 +199,22 @@ audio2.ts`
 test("startMasterRelay sub-relays proxy segments correctly", async () => {
   const { server: videoServer, url: videoBase } = await createM3U8Server(
     `#EXTM3U
-#EXT-X-VERSION:3
+#EXT-X-VERSION:4
 #EXTINF:10,
 seg1.ts
 #EXTINF:10,
 seg2.ts`,
-    "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:10,\naudio-seg.ts\n",
+    "#EXTM3U\n#EXT-X-VERSION:4\n#EXTINF:10,\naudio-seg.ts\n",
     "video-segment-data"
   );
   const { server: audioServer, url: audioBase } = await createM3U8Server(
     `#EXTM3U
-#EXT-X-VERSION:3
+#EXT-X-VERSION:4
 #EXTINF:10,
 audio1.ts
 #EXTINF:10,
 audio2.ts`,
-    "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:10,\naudio-seg.ts\n",
+    "#EXTM3U\n#EXT-X-VERSION:4\n#EXTINF:10,\naudio-seg.ts\n",
     "audio-segment-data"
   );
 
@@ -252,16 +252,16 @@ audio2.ts`,
 test("stopRelay cleans up master relay and sub-relays", async () => {
   const { server: videoServer, url: videoBase } = await createM3U8Server(
     `#EXTM3U
-#EXT-X-VERSION:3
+#EXT-X-VERSION:4
 #EXTINF:10,
 seg1.ts`
   );
   const { server: audioServer, url: audioBase } = await createM3U8Server(
     `#EXTM3U
-#EXT-X-VERSION:3
+#EXT-X-VERSION:4
 #EXTINF:10,
 audio1.ts`,
-    "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:10,\naudio-seg.ts\n"
+    "#EXTM3U\n#EXT-X-VERSION:4\n#EXTINF:10,\naudio-seg.ts\n"
   );
 
   const videoUrl = videoBase + "/video.m3u8";
@@ -292,7 +292,7 @@ audio1.ts`,
 test("startRelay (single) still works for non-split streams", async () => {
   const { server, url: base } = await createM3U8Server(
     `#EXTM3U
-#EXT-X-VERSION:3
+#EXT-X-VERSION:4
 #EXTINF:10,
 seg1.ts
 #EXTINF:10,
@@ -322,13 +322,13 @@ seg2.ts`
 test("master manifest has correct bandwidth and audio group references", async () => {
   const { server: videoServer, url: videoBase } = await createM3U8Server(
     `#EXTM3U
-#EXT-X-VERSION:3
+#EXT-X-VERSION:4
 #EXTINF:10,
 seg1.ts`
   );
   const { server: audioServer, url: audioBase } = await createM3U8Server(
     `#EXTM3U
-#EXT-X-VERSION:3
+#EXT-X-VERSION:4
 #EXTINF:10,
 audio1.ts`
   );
@@ -349,7 +349,7 @@ audio1.ts`
   // Verify the structure matches the spec exactly
   const lines = masterManifest.split("\n").filter((l) => l.trim());
   assert.strictEqual(lines[0], "#EXTM3U");
-  assert.strictEqual(lines[1], "#EXT-X-VERSION:3");
+  assert.strictEqual(lines[1], "#EXT-X-VERSION:4");
   const mediaIdx = lines.findIndex((l) => l.startsWith("#EXT-X-MEDIA:TYPE=AUDIO"));
   assert.ok(mediaIdx >= 0 && lines[mediaIdx].startsWith('#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio"'));
   const streamIdx = lines.findIndex((l) => l.startsWith("#EXT-X-STREAM-INF"));

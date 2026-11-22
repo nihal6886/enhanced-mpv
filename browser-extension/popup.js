@@ -19,14 +19,36 @@ function shortUrl(u) {
   }
 }
 
+// Pipeline stages from unified state machine
+const PipelineStage = {
+  IDLE: "IDLE",
+  SNIFFING: "SNIFFING",
+  PROBING: "PROBING",
+  PREWARMING: "PREWARMING",
+  SHADOW_READY: "SHADOW_READY",
+  LAUNCHING: "LAUNCHING",
+  PLAYING: "PLAYING",
+  FAILOVER: "FAILOVER",
+};
+
+let cachedPipelineState = null;
+let pipelineUpdateTimer = null;
+
 // Clear stream quality badges (4K / 1080p / HLS / YT-DLP) derived from the URL.
-// Adds AUDIO+VIDEO badge for verified master manifests with audio, or video-only with paired audio.
-// Adds VIDEO ONLY ⚠ warning for video-only sub-playlists without paired audio.
+ // Adds AUDIO+VIDEO badge for verified master manifests with audio, or video-only with paired audio.
+ // Adds VIDEO ONLY ⚠ warning for video-only sub-playlists without paired audio.
 function qualityBadges(it) {
   const u = String(it.url || "").toLowerCase();
   const badges = [];
   if (it.primary || it.type === "ytdlp") badges.push({ text: "YT-DLP", class: "" });
-  if (/2160|4k|uhd/.test(u)) badges.push({ text: "4K", class: "" });
+  if (it.height && it.height >= 2160) badges.push({ text: "4K", class: "" });
+  else if (it.height && it.height >= 1440) badges.push({ text: "1440p", class: "" });
+  else if (it.height && it.height >= 1080) badges.push({ text: "1080p", class: "" });
+  else if (it.height && it.height >= 720) badges.push({ text: "720p", class: "" });
+  else if (it.height && it.height >= 480) badges.push({ text: "480p", class: "" });
+  else if (it.height && it.height > 0) badges.push({ text: it.height + "p", class: "" });
+  else if (/2160|4k|uhd/.test(u)) badges.push({ text: "4K", class: "" });
+  else if (/1440|2k|qhd/.test(u)) badges.push({ text: "1440p", class: "" });
   else if (/1080|fhd/.test(u)) badges.push({ text: "1080p", class: "" });
   else if (/720/.test(u)) badges.push({ text: "720p", class: "" });
   if (/\.m3u8/.test(u)) badges.push({ text: "HLS", class: "" });
@@ -49,8 +71,40 @@ function qualityBadges(it) {
   else if (it.kind === "hls-video-only" && !it.audioUrl) {
     badges.push({ text: "VIDEO ONLY ⚠", class: "video-only" });
   }
+  // YouTube extracted stream badges
+  if (it.type === "youtube-extracted" || it.type === "youtube-extracted") {
+    if (it.hasAudio === false && it.isVideoOnly) {
+      badges.push({ text: "VIDEO ONLY ⚠", class: "video-only" });
+    } else if (it.hasAudio) {
+      badges.push({ text: "AUDIO+VIDEO", class: "audio-video" });
+    }
+    if (it.codecs) {
+      const codecBadge = it.codecs.includes("av01") ? "AV1" :
+                         it.codecs.includes("hev") || it.codecs.includes("h265") ? "HEVC" :
+                         it.codecs.includes("avc") || it.codecs.includes("h264") ? "H264" :
+                         it.codecs.includes("vp9") ? "VP9" : "";
+      if (codecBadge) badges.push({ text: codecBadge, class: "" });
+    }
+  }
 
-  return badges.slice(0, 3).map((b) => '<span class="quality-tag ' + escapeHtml(b.class) + '">' + escapeHtml(b.text) + "</span>").join("");
+  // PipelineState badges
+  if (cachedPipelineState) {
+    if (cachedPipelineState.stage === PipelineStage.SHADOW_READY) {
+      badges.unshift({ text: "⚡ SHADOW READY", class: "shadow-ready" });
+    } else if (cachedPipelineState.stage === PipelineStage.PREWARMING) {
+      badges.unshift({ text: "🔥 PREWARMING", class: "prewarming" });
+    } else if (cachedPipelineState.stage === PipelineStage.PROBING) {
+      badges.unshift({ text: "🔍 PROBING", class: "probing" });
+    } else if (cachedPipelineState.stage === PipelineStage.SNIFFING) {
+      badges.unshift({ text: "📡 SNIFFING", class: "sniffing" });
+    } else if (cachedPipelineState.stage === PipelineStage.LAUNCHING) {
+      badges.unshift({ text: "🚀 LAUNCHING", class: "launching" });
+    } else if (cachedPipelineState.stage === PipelineStage.FAILOVER) {
+      badges.unshift({ text: "🔄 FAILOVER", class: "failover" });
+    }
+  }
+
+  return badges.slice(0, 5).map((b) => '<span class="quality-tag ' + escapeHtml(b.class) + '">' + escapeHtml(b.text) + "</span>").join("");
 }
 
 const COPY_ICON = '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">'
@@ -67,10 +121,15 @@ function renderList(el, items, empty) {
   el.innerHTML = items.map((it, i) => {
     const tag = it.label || it.language || "";
     const text = it.primary && it.label ? it.label : shortUrl(it.url);
+    const bitrateInfo = it.bitrate ? ` · ${Math.round(it.bitrate / 1000)}k` : "";
+    const codecInfo = it.codecs ? ` · ${it.codecs}` : "";
+    const fpsInfo = it.fps ? ` · ${it.fps}fps` : "";
+    const extraInfo = bitrateInfo + codecInfo + fpsInfo;
     return '<div class="stream-row' + (it.primary ? " primary" : "") + '">'
       + '<input type="radio" name="stream" value="' + i + '"' + (i === 0 ? " checked" : "") + " />"
       + '<span class="stream-text" title="' + escapeHtml(it.url) + '">' + escapeHtml(text) + "</span>"
       + (it.primary && tag ? '<span class="muted small">' + escapeHtml(tag) + "</span>" : "")
+      + (extraInfo ? '<span class="muted small" style="margin-left:8px;">' + escapeHtml(extraInfo) + "</span>" : "")
       + '<span class="quality">' + qualityBadges(it) + "</span>"
       + '<button type="button" class="copy-url" data-url="' + escapeHtml(it.url) + '"'
       + ' title="Copy stream URL" aria-label="Copy stream URL">' + COPY_ICON + "</button>"
@@ -131,45 +190,175 @@ async function refreshLinkStatus() {
   dot.classList.toggle("offline", !linked);
   btn.hidden = linked;
   text.textContent = linked ? "Connected" : (res && res.ok ? "Not linked" : "Host offline");
+  
+  // Also fetch bridge status
+  fetchBridgeStatus();
   return linked;
 }
 
-// A proxy video (m3u8_proxy/video/...) without paired audio should trigger an
-// all-frame audio scan when the popup opens.
-function needsAudioScan(state) {
-  if (!state || !Array.isArray(state.videos)) return false;
-  return state.videos.some(v => /m3u8_proxy\/video\//i.test(v.url || "") && v.kind === "hls-video-only" && !v.audioUrl);
-}
-
-async function load() {
-  const tab = await activeTab();
-  if (!tab) return;
-  $("pageTitle").textContent = tab.title || tab.url || "";
-  let state = await chrome.runtime.sendMessage({ type: "getState", tabId: tab.id });
-  // If a proxy video has no audio yet, scan all frames and pair the sibling audio.
-  if (needsAudioScan(state)) {
-    const rescanned = await chrome.runtime.sendMessage({ type: "scanAudio", tabId: tab.id, pageUrl: tab.url });
-    if (rescanned) state = rescanned;
+// Fetch and display WebSocket bridge status
+async function fetchBridgeStatus() {
+  try {
+    const status = await chrome.runtime.sendMessage({ type: "bridge:getStatus" });
+    updateBridgeStatusUI(status);
+  } catch {
+    // Bridge not available, show disconnected
+    updateBridgeStatusUI({ connected: false, candidateCount: 0 });
   }
-  const videos = (state && state.videos) || [];
-  const subs = (state && state.subs) || [];
-  renderList($("videos"), videos, "None yet. Play the page video once.");
-  renderList($("subs"), subs, "None captured.");
-  $("count").textContent = String(videos.length + subs.length);
-  const sync = await chrome.storage.sync.get(["autoIntercept", "autoPlay"]);
-  $("autoIntercept").checked = Boolean(sync.autoIntercept);
-  $("autoPlay").checked = sync.autoPlay !== false;
-  await refreshLinkStatus();
-  const last = (await chrome.storage.local.get("lastLaunch")).lastLaunch;
-  if (last && last.result) showError(last.result);
 }
 
-// Pre-warm mpv and relay on DOMContentLoaded for zero-latency launch
-document.addEventListener("DOMContentLoaded", () => {
-  chrome.runtime.sendMessage({ type: "native", payload: { action: "prewarm" } });
+function updateBridgeStatusUI(status) {
+  const bridgeDot = document.getElementById("bridgeDot");
+  const bridgeText = document.getElementById("bridgeText");
+  const bridgeCount = document.getElementById("bridgeCount");
+  
+  if (!bridgeDot || !bridgeText) return;
+  
+  if (status && status.connected) {
+    bridgeDot.classList.add("connected");
+    bridgeDot.classList.remove("offline");
+    bridgeText.textContent = "REAL-TIME WS";
+    bridgeText.style.color = "var(--green-bright)";
+  } else {
+    bridgeDot.classList.add("offline");
+    bridgeDot.classList.remove("connected");
+    bridgeText.textContent = "DISCONNECTED";
+    bridgeText.style.color = "var(--red)";
+  }
+  
+  if (bridgeCount) {
+    bridgeCount.textContent = status && status.candidateCount ? status.candidateCount : "0";
+  }
+}
+
+// Update PipelineState UI from daemon
+function updatePipelineStateUI(pipelineState) {
+  if (!pipelineState) return;
+  
+  cachedPipelineState = pipelineState;
+  
+  const stageEl = document.getElementById("pipelineStage");
+  const stagePill = document.getElementById("stagePill");
+  const prewarmEl = document.getElementById("prewarmMs");
+  const relayStatsEl = document.getElementById("relayStats");
+  
+  if (stageEl) {
+    const stageLabels = {
+      IDLE: "IDLE",
+      SNIFFING: "SNIFFING",
+      PROBING: "PROBING",
+      PREWARMING: "PREWARMING",
+      SHADOW_READY: "SHADOW READY",
+      LAUNCHING: "LAUNCHING",
+      PLAYING: "PLAYING",
+      FAILOVER: "FAILOVER",
+    };
+    stageEl.textContent = stageLabels[pipelineState.stage] || pipelineState.stage;
+    stageEl.className = "stage-label " + (pipelineState.stage || "").toLowerCase().replace("_", "-");
+  }
+  
+  if (stagePill) {
+    stagePill.className = "stage-pill";
+    if (pipelineState.stage === PipelineStage.SHADOW_READY) {
+      stagePill.classList.add("shadow-ready");
+      stagePill.textContent = "⚡ SHADOW READY";
+    } else if (pipelineState.stage === PipelineStage.PREWARMING) {
+      stagePill.classList.add("prewarming");
+      stagePill.textContent = "🔥 PREWARMING";
+    } else if (pipelineState.stage === PipelineStage.PROBING) {
+      stagePill.classList.add("probing");
+      stagePill.textContent = "🔍 PROBING";
+    } else if (pipelineState.stage === PipelineStage.SNIFFING) {
+      stagePill.classList.add("sniffing");
+      stagePill.textContent = "📡 SNIFFING";
+    } else if (pipelineState.stage === PipelineStage.LAUNCHING) {
+      stagePill.classList.add("launching");
+      stagePill.textContent = "🚀 LAUNCHING";
+    } else if (pipelineState.stage === PipelineStage.FAILOVER) {
+      stagePill.classList.add("failover");
+      stagePill.textContent = "🔄 FAILOVER";
+    } else {
+      stagePill.textContent = pipelineState.stage;
+    }
+  }
+  
+  if (prewarmEl && pipelineState.prewarmMs) {
+    prewarmEl.textContent = `${pipelineState.prewarmMs}ms`;
+    prewarmEl.style.display = "inline";
+  } else if (prewarmEl) {
+    prewarmEl.style.display = "none";
+  }
+  
+  if (relayStatsEl && pipelineState.relayStats && pipelineState.relayStats.bytesPrefetched) {
+    const mb = (pipelineState.relayStats.bytesPrefetched / 1024 / 1024).toFixed(1);
+    const segs = pipelineState.relayStats.segmentsCached || 0;
+    relayStatsEl.textContent = `RAM Ring: ${mb} MiB / ${segs} segs`;
+    relayStatsEl.style.display = "inline";
+  } else if (relayStatsEl) {
+    relayStatsEl.style.display = "none";
+  }
+  
+  // Re-render lists to show PipelineState badges (async, non-blocking)
+  if (cachedPipelineState && cachedPipelineState.candidates) {
+    void (async () => {
+      try {
+        const tab = await activeTab();
+        if (tab) {
+          const state = await chrome.runtime.sendMessage({ type: "getState", tabId: tab.id });
+          if (state && state.videos) {
+            renderList($("videos"), state.videos, "None yet. Play the page video once.");
+          }
+        }
+      } catch { /* ignore */ }
+    })();
+  }
+}
+
+// Listen for PipelineState updates from background.js
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === "pipeline:state" && msg.payload) {
+    // Use void to handle async without blocking
+    void updatePipelineStateUI(msg.payload);
+  } else if (msg.type === "player:telemetry") {
+    // Update live telemetry if needed
+  }
 });
 
-load();
+function startPipelineStatePolling() {
+  if (pipelineUpdateTimer) return;
+  pipelineUpdateTimer = setInterval(async () => {
+    try {
+      const sessionState = await chrome.storage.session.get("pipelineState");
+      if (sessionState && sessionState.pipelineState) {
+        updatePipelineStateUI(sessionState.pipelineState);
+      }
+    } catch { /* ignore */ }
+  }, 500);
+}
+
+function stopPipelineStatePolling() {
+  if (pipelineUpdateTimer) {
+    clearInterval(pipelineUpdateTimer);
+    pipelineUpdateTimer = null;
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  chrome.runtime.sendMessage({ type: "native", payload: { action: "prewarm" } });
+  startPipelineStatePolling();
+});
+
+window.addEventListener("beforeunload", () => {
+  stopPipelineStatePolling();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    startPipelineStatePolling();
+  } else {
+    stopPipelineStatePolling();
+  }
+});
 
 async function selectedUrl() {
   const tab = await activeTab();
@@ -376,11 +565,13 @@ async function videoStateAcrossFrames(tabId, frameIds) {
   const ids = [...new Set(frameIds.filter((id) => Number.isInteger(id)))];
   const asks = ids.length
     ? ids.map((frameId) => chrome.tabs.sendMessage(tabId, { type: "getVideoState" }, { frameId })
-      .then((state) => ({ frameId, result: { frameUrl: "", videos: (state && state.videos) || [] } })))
+      .then((state) => ({ frameId, result: { frameUrl: "", videos: (state && state.videos) || [] } }))
+      .catch(() => null))
     : [chrome.tabs.sendMessage(tabId, { type: "getVideoState" })
-      .then((state) => ({ frameId: 0, result: { frameUrl: "", videos: (state && state.videos) || [] } }))];
+      .then((state) => ({ frameId: 0, result: { frameUrl: "", videos: (state && state.videos) || [] } }))
+      .catch(() => null)];
   const settled = await Promise.allSettled(asks);
-  return settled.filter((r) => r.status === "fulfilled").map((r) => r.value);
+  return settled.filter((r) => r.status === "fulfilled" && r.value).map((r) => r.value);
 }
 
 // Pause the selected video inside its own frame so the browser stops decoding.
@@ -525,3 +716,149 @@ $("linkExtension").addEventListener("click", async () => {
 
 bindList($("videos"));
 bindList($("subs"));
+
+// Aurora & Micro-Grid Background Animation (moved from inline script for CSP compliance)
+(function initAuroraGrid() {
+  try {
+    const canvas = document.getElementById("geminiBgCanvas");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const prefersReduced =
+      window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    let width = 0;
+    let height = 0;
+    let dpr = 1;
+    let rafId = null;
+
+    function resizeCanvas() {
+      try {
+        const rect = canvas.getBoundingClientRect();
+        width = Math.max(rect.width || window.innerWidth || 440, 1);
+        height = Math.max(rect.height || window.innerHeight || 600, 1);
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      } catch {
+        // ignore resize errors
+      }
+    }
+
+    function drawAurora(timeSec) {
+      ctx.clearRect(0, 0, width, height);
+
+      ctx.fillStyle = "#040507";
+      ctx.fillRect(0, 0, width, height);
+
+      const minDim = Math.min(width, height);
+      const washSpan = Math.max(minDim * 0.68, 260);
+      const orbs = [
+        {
+          x: width * (0.5 + Math.cos(timeSec * 0.68) * 0.25),
+          y: height * (0.5 + Math.sin(timeSec * 0.54) * 0.23),
+          r: washSpan,
+          color: "rgba(50, 215, 75, 0.30)"
+        },
+        {
+          x: width * (0.5 + Math.cos(timeSec * 0.58 + 2.2) * 0.27),
+          y: height * (0.5 + Math.sin(timeSec * 0.74 + 1.1) * 0.25),
+          r: washSpan * 0.95,
+          color: "rgba(100, 210, 255, 0.22)"
+        },
+        {
+          x: width * (0.5 + Math.sin(timeSec * 0.64 + 4.1) * 0.22),
+          y: height * (0.5 + Math.cos(timeSec * 0.60 + 2.9) * 0.24),
+          r: washSpan * 0.85,
+          color: "rgba(52, 211, 153, 0.24)"
+        }
+      ];
+
+      ctx.save();
+      ctx.globalCompositeOperation = "screen";
+
+      for (let i = 0; i < orbs.length; i++) {
+        const orb = orbs[i];
+        const grad = ctx.createRadialGradient(orb.x, orb.y, 0, orb.x, orb.y, orb.r);
+        grad.addColorStop(0, orb.color);
+        grad.addColorStop(0.42, orb.color.replace(/0\.\d+\)$/, "0.12)"));
+        grad.addColorStop(0.76, orb.color.replace(/0\.\d+\)$/, "0.025)"));
+        grad.addColorStop(1, "rgba(4, 5, 7, 0)");
+
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, width, height);
+      }
+
+      ctx.restore();
+    }
+
+    function drawGrid() {
+      const step = 24;
+      ctx.save();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.028)";
+      ctx.lineWidth = 1;
+
+      ctx.beginPath();
+      for (let x = 0; x <= width; x += step) {
+        const alignedX = Math.floor(x) + 0.5;
+        ctx.moveTo(alignedX, 0);
+        ctx.lineTo(alignedX, height);
+      }
+
+      for (let y = 0; y <= height; y += step) {
+        const alignedY = Math.floor(y) + 0.5;
+        ctx.moveTo(0, alignedY);
+        ctx.lineTo(width, alignedY);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function renderFrame(nowMs) {
+      try {
+        const elapsedSec = (nowMs || 0) * 0.001;
+        drawAurora(elapsedSec);
+        drawGrid();
+
+        if (!prefersReduced) {
+          rafId = window.requestAnimationFrame(renderFrame);
+        }
+      } catch {
+        // ignore render errors
+      }
+    }
+
+    resizeCanvas();
+    renderFrame(performance.now());
+
+    window.addEventListener("resize", function handleResize() {
+      resizeCanvas();
+      if (prefersReduced) {
+        renderFrame(0);
+      }
+    });
+
+    // Keyboard shortcut: Cmd/Ctrl + Enter triggers primary Launch button
+    window.addEventListener("keydown", function handleKeydown(e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        const playBtn = document.getElementById("play");
+        if (playBtn && !playBtn.disabled) {
+          e.preventDefault();
+          playBtn.click();
+        }
+      }
+    });
+
+    window.addEventListener("pagehide", function handleHide() {
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+    });
+  } catch {
+    // ignore initialization errors
+  }
+})();

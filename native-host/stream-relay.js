@@ -10,6 +10,154 @@ const RELAY_TIMEOUT_MS = 3000;
 const MAX_RELAYS = 10;
 const TOKEN_BYTES = 16;
 
+// RAM Segment Ring - LRU Prefetch Cache
+const PREFETCH_CACHE_MAX_BYTES = 32 * 1024 * 1024; // 32 MiB
+const PREFETCH_CACHE_TTL_MS = 60 * 1000; // 60 seconds
+const PREFETCH_MAX_SEGMENTS = 2; // Segments #0 and #1
+
+const prefetchCache = new Map(); // key -> { data: Buffer, timestamp: number, size: number }
+let prefetchCacheSize = 0;
+const prefetchInFlight = new Set();
+
+function prefetchCacheKey(videoUrl, audioUrl) {
+  return videoUrl + "|" + (audioUrl || "");
+}
+
+function evictPrefetchCache(targetBytes) {
+  const entries = [...prefetchCache.entries()];
+  entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
+  for (const [key, entry] of entries) {
+    if (prefetchCacheSize <= targetBytes) break;
+    prefetchCacheSize -= entry.size;
+    prefetchCache.delete(key);
+  }
+}
+
+function addToPrefetchCache(key, data) {
+  const size = data.length;
+  if (size > PREFETCH_CACHE_MAX_BYTES) return;
+  while (prefetchCacheSize + size > PREFETCH_CACHE_MAX_BYTES) {
+    evictPrefetchCache(prefetchCacheSize - size);
+  }
+  prefetchCache.set(key, { data, timestamp: Date.now(), size });
+  prefetchCacheSize += size;
+}
+
+function getFromPrefetchCache(key) {
+  const entry = prefetchCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > PREFETCH_CACHE_TTL_MS) {
+    prefetchCacheSize -= entry.size;
+    prefetchCache.delete(key);
+    return null;
+  }
+  entry.timestamp = Date.now(); // LRU touch
+  return entry.data;
+}
+
+function cleanupPrefetchCache() {
+  const now = Date.now();
+  for (const [key, entry] of prefetchCache.entries()) {
+    if (now - entry.timestamp > PREFETCH_CACHE_TTL_MS) {
+      prefetchCacheSize -= entry.size;
+      prefetchCache.delete(key);
+    }
+  }
+}
+
+// Periodic cache cleanup
+setInterval(cleanupPrefetchCache, 30000);
+
+// Fetch and cache master playlist, variant playlist, init segment, and first 2 segments
+async function prefetchStreamSegments(masterUrl, headers) {
+  const cacheKey = prefetchCacheKey(masterUrl, null);
+  if (prefetchInFlight.has(cacheKey)) return;
+  if (getFromPrefetchCache(cacheKey)) return; // Already cached
+
+  prefetchInFlight.add(cacheKey);
+  try {
+    // 1. Fetch master playlist
+    const masterRes = await fetchWithHeaders(masterUrl, headers, 5000);
+    if (masterRes.statusCode !== 200 && masterRes.statusCode !== 206) return;
+    const masterText = masterRes.body.toString("utf8");
+    const masterParsed = parseM3U8(masterText, masterUrl);
+
+    if (!masterParsed.isMaster || !masterParsed.variants.length) return;
+
+    // Pick highest bandwidth variant
+    const bestVariant = masterParsed.variants[0];
+    const variantUrl = bestVariant.url;
+
+    // 2. Fetch variant playlist
+    const variantRes = await fetchWithHeaders(variantUrl, headers, 5000);
+    if (variantRes.statusCode !== 200 && variantRes.statusCode !== 206) return;
+    const variantText = variantRes.body.toString("utf8");
+    parseM3U8(variantText, variantUrl); // Parse to validate structure
+
+    // 3. Find EXT-X-MAP (init segment) and first 2 media segments
+    const lines = variantText.split("\n");
+    let initSegmentUrl = null;
+    const segmentUrls = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (line.startsWith("#EXT-X-MAP:")) {
+        const attrs = parseAttributes(line.slice("#EXT-X-MAP:".length));
+        if (attrs.URI) {
+          try {
+            initSegmentUrl = new URL(attrs.URI, variantUrl).toString();
+          } catch { /* ignore */ }
+        }
+      } else if (line.startsWith("#EXTINF:")) {
+        const nextLine = lines[i + 1]?.trim();
+        if (nextLine && !nextLine.startsWith("#") && segmentUrls.length < PREFETCH_MAX_SEGMENTS) {
+          try {
+            segmentUrls.push(new URL(nextLine, variantUrl).toString());
+          } catch { /* ignore */ }
+        }
+      }
+    }
+
+    // 4. Fetch init segment + first 2 segments in parallel
+    const urlsToFetch = [];
+    if (initSegmentUrl) urlsToFetch.push(initSegmentUrl);
+    urlsToFetch.push(...segmentUrls);
+
+    if (urlsToFetch.length === 0) return;
+
+    const results = await fetchSegmentsConcurrently(urlsToFetch, headers, { concurrency: 4 });
+
+    // 5. Combine all fetched data into a single buffer for cache
+    const chunks = [];
+    for (let i = 0; i < results.length; i++) {
+      if (results[i].ok) {
+        chunks.push(results[i].res.body);
+      }
+    }
+    if (chunks.length === 0) return;
+
+    const combined = Buffer.concat(chunks);
+    addToPrefetchCache(cacheKey, combined);
+  } catch {
+    // Silently ignore prefetch failures
+  } finally {
+    prefetchInFlight.delete(cacheKey);
+  }
+}
+
+// Serve prefetched data from cache if available
+function serveFromPrefetchCache(key, res) {
+  const data = getFromPrefetchCache(key);
+  if (!data) return false;
+
+  res.setHeader("Content-Type", "video/mp2t");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Cache-Control", "no-store");
+  res.writeHead(200);
+  res.end(data);
+  return true;
+}
+
 function upstreamHeaders(headers) {
   return {
     ...(headers || {}),
@@ -396,7 +544,15 @@ async function relayPlaylist(res, playlistUrl, headers, base) {
 // Proxy one resource. Nested playlists (variant / rendition playlists reached
 // from a master) are rewritten too, so their segments, keys, and init
 // segments also go through the authenticated relay.
-async function relayResource(req, res, resourceUrl, headers, base) {
+async function relayResource(req, res, resourceUrl, headers, base, masterUrl) {
+  // Check prefetch cache first for instant serving of init segment + first 2 segments
+  if (masterUrl) {
+    const cacheKey = prefetchCacheKey(masterUrl, null);
+    if (serveFromPrefetchCache(cacheKey, res)) {
+      return;
+    }
+  }
+
   const upstreamHeaders = { ...headers };
   if (req.headers.range) upstreamHeaders.Range = req.headers.range;
   const { res: upstream, finalUrl } = await openUpstream(resourceUrl, upstreamHeaders);
@@ -460,7 +616,7 @@ function createPlaylistRelay(manifestUrl, headers, token, prefix, key) {
           res.end("Invalid segment URL");
           return;
         }
-        await relayResource(req, res, resourceUrl, headers, base);
+await relayResource(req, res, resourceUrl, headers, base, manifestUrl);
       } catch (err) {
         if (!res.headersSent) {
           res.writeHead(502);
@@ -602,7 +758,7 @@ async function startMasterRelay(videoUrl, videoHeaders, audioUrl, audioHeaders, 
         const audioCodecs = info.audioCodecs ? `,CODECS="${String(info.audioCodecs).replace(/"/g, "")}"` : "";
         const masterManifest = [
           "#EXTM3U",
-          "#EXT-X-VERSION:3",
+          "#EXT-X-VERSION:4",
           "#EXT-X-INDEPENDENT-SEGMENTS",
           `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Default",DEFAULT=YES,AUTOSELECT=YES${audioCodecs},URI="${audioRelayUrl}"`,
           `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth}${resolution}${codecs}${frameRate},AUDIO="audio"`,
@@ -669,6 +825,23 @@ function getRelayInfo(token) {
   return activeRelays.get(token);
 }
 
+// Get cache statistics for PipelineState
+function getPrefetchCacheStats() {
+  let totalBytes = 0;
+  let segmentCount = 0;
+  for (const entry of prefetchCache.values()) {
+    totalBytes += entry.size;
+    segmentCount++;
+  }
+  return {
+    bytesPrefetched: totalBytes,
+    segmentsCached: segmentCount,
+    cacheHitRate: 0, // Would need hit/miss tracking
+    maxBytes: PREFETCH_CACHE_MAX_BYTES,
+    ttlMs: PREFETCH_CACHE_TTL_MS,
+  };
+}
+
 module.exports = {
   startRelay,
   startMasterRelay,
@@ -682,4 +855,8 @@ module.exports = {
   cleanupOldRelays,
   rewriteManifestUrls,
   activeRelays,
+  prefetchStreamSegments,
+  prefetchCache,
+  getFromPrefetchCache,
+  getPrefetchCacheStats,
 };

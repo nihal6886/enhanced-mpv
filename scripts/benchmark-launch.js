@@ -14,6 +14,9 @@ const runsArg = args.find((arg) => arg.startsWith("--runs="));
 const runs = Math.max(1, parseInt(runsArg ? runsArg.slice("--runs=".length) : String(DEFAULT_RUNS), 10) || DEFAULT_RUNS);
 const ROOT = path.resolve(__dirname, "..");
 
+const PERSISTENT_SOCKET_PATH = "\\\\.\\pipe\\enhanced-mpv-bench-" + process.pid;
+const DAEMON_TOKEN = "benchmark-token";
+
 function median(values) {
   const sorted = values.slice().sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
@@ -126,11 +129,96 @@ async function benchmarkIpcDispatch() {
   } finally {
     await server.close();
   }
-  return summarize("Named-pipe IPC dispatch", values, 100);
+  return summarize("Named-pipe IPC dispatch (per-connection)", values, 100);
+}
+
+async function startPersistentSocketServer() {
+  const server = net.createServer((socket) => {
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let nl;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!line) continue;
+        let request = {};
+        try { request = JSON.parse(line); } catch { /* malformed */ }
+        const command = Array.isArray(request.command) ? request.command : [];
+        const response = command[0] === "get_property"
+          ? { error: "success", data: command[1] === "pid" ? process.pid : null, request_id: request.request_id }
+          : { error: "success", data: null, request_id: request.request_id };
+        try { socket.write(JSON.stringify(response) + "\n"); } catch { /* ignore */ }
+      }
+    });
+    socket.on("error", () => {});
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(PERSISTENT_SOCKET_PATH, resolve);
+  });
+  return {
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+}
+
+async function benchmarkPersistentSocketDispatch() {
+  if (!net) return null;
+  const server = await startPersistentSocketServer();
+  const payload = { url: "https://example.com/video.mp4" };
+  const values = [];
+  let persistentSock = null;
+  
+  async function connectPersistent() {
+    return new Promise((resolve, reject) => {
+      const sock = net.connect(PERSISTENT_SOCKET_PATH);
+      sock.setNoDelay(true);
+      sock.on("connect", () => resolve(sock));
+      sock.on("error", reject);
+      sock.setTimeout(1000, () => { sock.destroy(); reject(new Error("persistent socket connect timeout")); });
+    });
+  }
+  
+  async function dispatchPersistent(payload) {
+    if (!persistentSock || persistentSock.destroyed) {
+      persistentSock = await connectPersistent();
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let buffer = "";
+      const finish = (err, value) => {
+        if (settled) return;
+        settled = true;
+        if (err) reject(err);
+        else resolve(value);
+      };
+      persistentSock.setTimeout(1500, () => finish(new Error("ipc timeout")));
+      persistentSock.once("data", (chunk) => {
+        buffer += chunk.toString("utf8");
+        if (buffer.includes("\n")) finish(null, buffer);
+      });
+      persistentSock.once("error", finish);
+      persistentSock.write(JSON.stringify({ command: ["loadfile", payload.url, "replace", -1, { start: "0" }], request_id: 1 }) + "\n");
+    });
+  }
+  
+  try {
+    // Warm connection
+    await dispatchPersistent(payload);
+    for (let i = 0; i < runs; i += 1) {
+      const start = process.hrtime.bigint();
+      await dispatchPersistent(payload);
+      values.push(Number(process.hrtime.bigint() - start) / 1e6);
+    }
+  } finally {
+    if (persistentSock) persistentSock.destroy();
+    await server.close();
+  }
+  return summarize("Persistent-socket IPC dispatch (pre-connected)", values, 3);
 }
 
 async function startMockDaemon() {
-  const token = "benchmark-token";
+  const token = DAEMON_TOKEN;
   const server = http.createServer((req, res) => {
     if (req.headers["x-enhanced-mpv-token"] !== token) {
       res.writeHead(401);
@@ -183,7 +271,53 @@ async function benchmarkLoopbackDispatch() {
   } finally {
     await daemon.close();
   }
-  return summarize("Loopback daemon dispatch", values, 100);
+  return summarize("Loopback daemon dispatch (HTTP)", values, 100);
+}
+
+async function benchmarkLoopbackToPipe() {
+  if (!net) return null;
+  const daemon = await startMockDaemon();
+  const url = "http://127.0.0.1:" + daemon.port + "/dispatch";
+  const payload = JSON.stringify({ action: "play", url: "https://example.com/video.mp4" });
+  const values = [];
+  let persistentSock = null;
+  
+  async function connectPersistent() {
+    return new Promise((resolve, reject) => {
+      const sock = net.connect(PERSISTENT_SOCKET_PATH);
+      sock.setNoDelay(true);
+      sock.on("connect", () => resolve(sock));
+      sock.on("error", reject);
+      sock.setTimeout(1000, () => { sock.destroy(); reject(new Error("persistent socket connect timeout")); });
+    });
+  }
+  
+  async function dispatchViaDaemonAndPipe(payload) {
+    // This simulates: HTTP daemon -> persistent pipe -> mpv
+    // We measure the full round-trip: HTTP POST to daemon, then daemon forwards to pipe
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-enhanced-mpv-token": daemon.token,
+      },
+      body: payload,
+    });
+    if (!response.ok) throw new Error("daemon status " + response.status);
+    await response.json();
+    return true;
+  }
+  
+  try {
+    for (let i = 0; i < runs; i += 1) {
+      const start = process.hrtime.bigint();
+      await dispatchViaDaemonAndPipe(payload);
+      values.push(Number(process.hrtime.bigint() - start) / 1e6);
+    }
+  } finally {
+    await daemon.close();
+  }
+  return summarize("Loopback-to-pipe (daemon HTTP + persistent pipe)", values, 10);
 }
 
 function findMpv() {
@@ -245,7 +379,10 @@ async function main() {
   const rows = [];
   const ipc = await benchmarkIpcDispatch();
   if (ipc) rows.push(ipc);
+  const persistent = await benchmarkPersistentSocketDispatch();
+  if (persistent) rows.push(persistent);
   rows.push(await benchmarkLoopbackDispatch());
+  rows.push(await benchmarkLoopbackToPipe());
   if (real) {
     const realRow = await benchmarkRealMpvIpc();
     if (realRow) rows.push(realRow);

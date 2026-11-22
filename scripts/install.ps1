@@ -12,6 +12,7 @@ param(
   [switch]$WithFfmpeg,
   [switch]$Yes,
   [switch]$Force,
+  [switch]$DevTools,
   [string]$Repo = $(if ($env:ENHANCED_MPV_REPO) { $env:ENHANCED_MPV_REPO } else { "nihal6886/enhanced-mpv" }),
   [string]$Branch = $(if ($env:ENHANCED_MPV_BRANCH) { $env:ENHANCED_MPV_BRANCH } else { "main" })
 )
@@ -453,7 +454,7 @@ foreach ($f in @("mpv.conf", "input.conf")) {
   Backup-File (Join-Path $MpvDir $f)
   Copy-Item (Join-Path $Root "mpv-config\$f") (Join-Path $MpvDir $f) -Force
 }
-foreach ($f in @("window-icon.lua", "enhanced-mpv.lua", "smart-sub-manager.lua", "loading-screen.lua", "player-menus.lua")) {
+foreach ($f in @("window-icon.lua", "enhanced-mpv.lua", "smart-sub-manager.lua", "loading-screen.lua", "player-menus.lua", "dev-tools.lua", "stream-controller.lua")) {
   Copy-Item (Join-Path $Root "mpv-config\scripts\$f") (Join-Path $MpvDir "scripts\$f") -Force
 }
 Get-ChildItem (Join-Path $Root "mpv-config\script-opts") -File |
@@ -463,6 +464,13 @@ Get-ChildItem (Join-Path $Root "mpv-config\script-opts") -File |
 # Custom player icon used by window-icon.lua and the Start Menu shortcut.
 $MpvIco = Join-Path $MpvDir "enhanced-mpv.ico"
 Copy-Item (Join-Path $Root "assets\enhanced-mpv.ico") $MpvIco -Force
+
+# Also copy to local mpv dir for window-icon.lua
+$LocalMpvDir = Join-Path $env:LOCALAPPDATA "Programs\mpv"
+New-Item -ItemType Directory -Force -Path $LocalMpvDir | Out-Null
+$LocalMpvIco = Join-Path $LocalMpvDir "enhanced-mpv.ico"
+Copy-Item (Join-Path $Root "assets\enhanced-mpv.ico") $LocalMpvIco -Force
+Write-Host "Copied enhanced-mpv.ico to $LocalMpvDir"
 
 # Create EnhancedMPV folder and copy mpv.exe there as enhanced-mpv.exe, then stamp the icon.
 function Stamp-EnhancedMpvIcon {
@@ -516,7 +524,18 @@ function Stamp-EnhancedMpvIcon {
       Write-Host "Stamping Enhanced MPV icon into $EnhancedMpvExe..."
       & $rcedit $EnhancedMpvExe --set-icon $iconPath
       if ($LASTEXITCODE -eq 0) {
-        Write-Host "Icon stamped successfully."
+        Write-Host "Icon stamped successfully on enhanced-mpv.exe."
+        # Also stamp the local mpv.exe so window-icon.lua finds it directly
+        $localMpvExe = Join-Path $env:LOCALAPPDATA "Programs\mpv\mpv.exe"
+        if (Test-Path $localMpvExe) {
+          Write-Host "Stamping Enhanced MPV icon into $localMpvExe..."
+          & $rcedit $localMpvExe --set-icon $iconPath
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Icon stamped successfully on local mpv.exe."
+          } else {
+            Write-Warning "rcedit failed (exit code $LASTEXITCODE) on local mpv.exe; icon may not be applied."
+          }
+        }
         # Refresh Windows icon cache so the neon green play icon appears immediately
         # in the window titlebar and taskbar.
         $ie4uinit = "C:\Windows\System32\ie4uinit.exe"
@@ -525,7 +544,7 @@ function Stamp-EnhancedMpvIcon {
           & $ie4uinit -show
         }
       } else {
-        Write-Warning "rcedit failed (exit code $LASTEXITCODE); icon may not be applied."
+        Write-Warning "rcedit failed (exit code $LASTEXITCODE) on enhanced-mpv.exe; icon may not be applied."
       }
     }
   }
@@ -537,11 +556,35 @@ Stamp-EnhancedMpvIcon
 # local files get instant previews while remote streams never spawn a subprocess.
 Set-ThumbfastPath $MpvDir $MpvBin
 
+# Ensure ytdl_hook.conf points to yt-dlp.exe so ytdl_hook finds it immediately.
+function Set-YtdlHookPath($Dir, $Bin) {
+  $hookDir = Join-Path $Dir "script-opts"
+  New-Item -ItemType Directory -Force -Path $hookDir | Out-Null
+  $hookFile = Join-Path $hookDir "ytdl_hook.conf"
+  $ytDlpExe = Get-Command yt-dlp -ErrorAction SilentlyContinue
+  if (-not $ytDlpExe) {
+    $ytDlpExe = Get-Command "yt-dlp.exe" -ErrorAction SilentlyContinue
+  }
+  if ($ytDlpExe) {
+    $ytDlpPath = $ytDlpExe.Source
+    [System.IO.File]::WriteAllText($hookFile, "ytdl_path=$ytDlpPath", $Utf8NoBom)
+    Write-Host "ytdl_hook: ytdl_path=$ytDlpPath in $hookFile"
+  } else {
+    Write-Warning "yt-dlp not found on PATH; ytdl_hook.conf not created."
+  }
+}
+Set-YtdlHookPath $MpvDir $MpvBin
+
 # Windows IPC uses a named pipe (not a Unix socket); rewrite the copied mpv.conf.
 $MpvConf = Join-Path $MpvDir "mpv.conf"
 if (Test-Path $MpvConf) {
   $patched = Get-Content $MpvConf | ForEach-Object {
     if ($_ -match '^\s*input-ipc-server=') { 'input-ipc-server=\\.\pipe\enhanced-mpv-socket' } else { $_ }
+  }
+  # Apply dev-diag profile if -DevTools switch was passed
+  if ($DevTools) {
+    $patched += @("", "[dev-diag]")
+    Write-Host "DevTools mode enabled: applied [dev-diag] profile (verbose demux/ffmpeg/ytdl logging)"
   }
   [System.IO.File]::WriteAllLines($MpvConf, [string[]]$patched, $Utf8NoBom)
 }

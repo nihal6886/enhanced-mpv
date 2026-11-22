@@ -3,6 +3,41 @@
 const RESOURCE_RE = /\.(m3u8|mpd|vtt|srt)(?:$|[?#])/i;
 const MANIFEST_RE = /\.(m3u8|mpd)(?:$|[?#])/i;
 
+const MIN_VIDEO_WIDTH = 320;
+const MIN_VIDEO_HEIGHT = 180;
+const HOVER_PILL_ID = "__empv_hover_pill";
+const HOVER_PILL_STYLES = `
+  position: fixed;
+  z-index: 2147483647;
+  pointer-events: auto;
+  background: linear-gradient(180deg, #0D1117 0%, #161B22 100%);
+  border: 1px solid #4ADE80;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  color: #4ADE80;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.6), 0 0 0 1px rgba(74,222,128,0.2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 120ms ease, transform 120ms ease;
+  white-space: nowrap;
+`;
+const HOVER_PILL_HOVER_STYLES = `
+  opacity: 1;
+  transform: translateY(0);
+`;
+const HOVER_PILL_READY_STYLES = `
+  background: linear-gradient(180deg, #0D1117 0%, #161B22 100%);
+  border-color: #4ADE80;
+  color: #4ADE80;
+`;
+
 function isManifestUrl(url) {
   return MANIFEST_RE.test(url);
 }
@@ -278,6 +313,208 @@ async function post() {
   }
 }
 
+// ============================================================================
+// Shadow-DOM Hover Pill for Manual Instant Launch
+// ============================================================================
+
+let hoverPill = null;
+let hoverPillVideo = null;
+let hoverPillHideTimer = null;
+let shadowReady = false;
+
+function createHoverPill() {
+  if (hoverPill) return hoverPill;
+  
+  const pill = document.createElement("div");
+  pill.id = HOVER_PILL_ID;
+  pill.style.cssText = HOVER_PILL_STYLES;
+  pill.innerHTML = `
+    <span class="pill-icon">⚡</span>
+    <span class="pill-text">SHADOW READY</span>
+    <span class="pill-sub">Click to open in MPV</span>
+  `;
+  
+  // Use Shadow DOM for style isolation
+  const shadow = pill.attachShadow({ mode: "closed" });
+  const style = document.createElement("style");
+  style.textContent = `
+    :host {
+      ${HOVER_PILL_STYLES}
+    }
+    :host(.visible) {
+      ${HOVER_PILL_HOVER_STYLES}
+    }
+    :host(.ready) {
+      ${HOVER_PILL_READY_STYLES}
+    }
+    .pill-icon { font-size: 12px; }
+    .pill-text { font-weight: 700; }
+    .pill-sub { font-size: 10px; font-weight: 400; opacity: 0.8; }
+  `;
+  shadow.appendChild(style);
+  shadow.appendChild(pill);
+  
+  // Click handler - sends TAKEOVER_PAUSE and launches
+  pill.addEventListener("click", (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    handlePillClick();
+  });
+  
+  document.body.appendChild(pill);
+  hoverPill = pill;
+  return pill;
+}
+
+function updateHoverPillPosition(video) {
+  if (!hoverPill || !video) return;
+  const rect = video.getBoundingClientRect();
+  const scrollX = window.scrollX || window.pageXOffset;
+  const scrollY = window.scrollY || window.pageYOffset;
+  
+  // Position at top-right of video
+  hoverPill.style.left = (rect.right + scrollX - hoverPill.offsetWidth - 8) + "px";
+  hoverPill.style.top = (rect.top + scrollY + 8) + "px";
+}
+
+function showHoverPill(video) {
+  if (!hoverPill) createHoverPill();
+  hoverPillVideo = video;
+  updateHoverPillPosition(video);
+  
+  // Add visible class for animation
+  requestAnimationFrame(() => {
+    hoverPill.classList.add("visible");
+  });
+  
+  if (shadowReady) {
+    hoverPill.classList.add("ready");
+  }
+  
+  // Auto-hide after 3 seconds of no mouse movement over video
+  clearTimeout(hoverPillHideTimer);
+  hoverPillHideTimer = setTimeout(() => {
+    hideHoverPill();
+  }, 3000);
+}
+
+function hideHoverPill() {
+  if (!hoverPill) return;
+  hoverPill.classList.remove("visible");
+  hoverPillVideo = null;
+  clearTimeout(hoverPillHideTimer);
+}
+
+function handlePillClick() {
+  if (!hoverPillVideo) return;
+  
+  // Immediately pause and mute the browser video to release bandwidth
+  const video = hoverPillVideo;
+  video.pause();
+  video.muted = true;
+  
+  // Send TAKEOVER_PAUSE to background for instant launch
+  chrome.runtime.sendMessage({
+    type: "TAKEOVER_PAUSE",
+    videoUrl: video.currentSrc || video.src,
+    currentTime: video.currentTime,
+    duration: video.duration,
+  });
+  
+  hideHoverPill();
+}
+
+function updateShadowReady(ready) {
+  shadowReady = ready;
+  if (hoverPill) {
+    if (ready) {
+      hoverPill.classList.add("ready");
+      hoverPill.shadowRoot.querySelector(".pill-text").textContent = "SHADOW READY";
+      hoverPill.shadowRoot.querySelector(".pill-sub").textContent = "Click for instant Frame 1";
+    } else {
+      hoverPill.classList.remove("ready");
+      hoverPill.shadowRoot.querySelector(".pill-text").textContent = "OPEN IN MPV";
+      hoverPill.shadowRoot.querySelector(".pill-sub").textContent = "Click to launch";
+    }
+  }
+}
+
+// Track mouse over video elements for hover pill
+let currentHoverVideo = null;
+
+function attachVideoHoverListeners() {
+  const videos = document.querySelectorAll("video");
+  videos.forEach(video => {
+    if (video.dataset.empvHoverAttached) return;
+    if (video.videoWidth < MIN_VIDEO_WIDTH || video.videoHeight < MIN_VIDEO_HEIGHT) return;
+    
+    video.dataset.empvHoverAttached = "true";
+    
+    video.addEventListener("mouseenter", () => {
+      currentHoverVideo = video;
+      clearTimeout(hoverPillHideTimer);
+      showHoverPill(video);
+    });
+    
+    video.addEventListener("mousemove", () => {
+      if (currentHoverVideo === video) {
+        clearTimeout(hoverPillHideTimer);
+        updateHoverPillPosition(video);
+        hoverPillHideTimer = setTimeout(() => {
+          hideHoverPill();
+        }, 3000);
+      }
+    });
+    
+    video.addEventListener("mouseleave", () => {
+      if (currentHoverVideo === video) {
+        currentHoverVideo = null;
+        hoverPillHideTimer = setTimeout(() => {
+          hideHoverPill();
+        }, 500);
+      }
+    });
+  });
+}
+
+// Observe new video elements
+const videoObserver = new MutationObserver(() => {
+  attachVideoHoverListeners();
+});
+videoObserver.observe(document.documentElement, { childList: true, subtree: true });
+
+// Initial attach
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", attachVideoHoverListeners);
+} else {
+  attachVideoHoverListeners();
+}
+
+// Listen for shadow ready updates from background
+chrome.runtime.onMessage.addListener((msg, _sender) => {
+  if (msg.type === "shadowReady") {
+    updateShadowReady(msg.ready);
+  }
+});
+
+// Handle TAKEOVER_PAUSE - immediately pause and mute all videos
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === "TAKEOVER_PAUSE") {
+    for (const v of deepVideos()) {
+      try {
+        v.pause();
+        v.muted = true;
+      } catch { /* ignore */ }
+    }
+    // Also notify MAIN-world hook
+    document.dispatchEvent(new CustomEvent("__empv_media_req", {
+      detail: JSON.stringify({ id: "takeover-" + Date.now(), op: "pauseAll" })
+    }));
+    sendResponse({ ok: true });
+    return true;
+  }
+});
+
 post();
 const obs = new MutationObserver(() => post());
 obs.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "srclang"] });
@@ -295,6 +532,28 @@ chrome.runtime.onMessage.addListener(async (msg, _sender, sendResponse) => {
   if (msg.type === "scan") {
     sendResponse(await collect());
     return true;
+  }
+});
+
+window.addEventListener("message", async (event) => {
+  if (event.source !== window) return;
+  const data = event.data;
+  if (!data || data.source !== "content-extractor") return;
+
+  if (data.type === "EMPV_STREAM_EXTRACTED" && data.data) {
+    chrome.runtime.sendMessage({
+      type: "extractedStreams",
+      tabId: (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id,
+      data: data.data,
+    }).catch(() => {});
+  } else if (data.type === "EMPV_MANIFEST_URL" && data.url) {
+    chrome.runtime.sendMessage({
+      type: "manifestUrl",
+      tabId: (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id,
+      url: data.url,
+      playerType: data.playerType,
+      timestamp: data.timestamp,
+    }).catch(() => {});
   }
 });
 

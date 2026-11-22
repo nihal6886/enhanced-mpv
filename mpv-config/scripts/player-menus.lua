@@ -2,7 +2,7 @@
   player-menus.lua
 
   Sleek, mouse-friendly floating menus for quality, audio, and subtitle control.
-  Styled in dark studio (#141820) + neon green (#4ADE80) with rounded cards,
+  Styled in dark studio (#0D1117) + neon green (#4ADE80) with rounded cards,
   hover states, and active checkmarks.
 ]]
 
@@ -97,8 +97,8 @@ local function switch_stream_item(item, is_source)
   local options = {
     ytdl = "no",
     ["resume-playback"] = "no",
-    ["demuxer-lavf-analyzeduration"] = "0.5",
-    ["demuxer-lavf-probesize"] = "500000",
+    ["demuxer-lavf-analyzeduration"] = "0.15",
+    ["demuxer-lavf-probesize"] = "65536",
     ["cache"] = "yes",
     ["cache-secs"] = "15",
     ["demuxer-readahead-secs"] = "5",
@@ -161,9 +161,9 @@ local function get_audio_tracks()
       local codec = t.codec or ""
       local channels = t["audio-channels"] or 0
       local label = lang
-      if title ~= "" then label = label .. " · " .. title end
-      if codec ~= "" then label = label .. " · " .. codec:upper() end
-      if channels > 0 then label = label .. " · " .. tostring(channels) .. "ch" end
+      if title ~= "" then label = label .. " \xC2\xB7 " .. title end
+      if codec ~= "" then label = label .. " \xC2\xB7 " .. codec:upper() end
+      if channels > 0 then label = label .. " \xC2\xB7 " .. tostring(channels) .. "ch" end
       table.insert(audio_tracks, { id = t.id, label = label, selected = t.selected })
     end
   end
@@ -178,7 +178,7 @@ local function get_subtitle_tracks()
       local lang = t.lang or "und"
       local title = t.title or ""
       local label = lang
-      if title ~= "" then label = label .. " · " .. title end
+      if title ~= "" then label = label .. " \xC2\xB7 " .. title end
       table.insert(sub_tracks, { id = t.id, label = label, selected = t.selected, external = t.external or false })
     end
   end
@@ -195,7 +195,7 @@ local function build_menu_ass(title, items, selected)
   local panel_h = 84 + (math.max(1, #items) * row_h)
   table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\bord1\\shad0\\1c%s\\3c%s\\alpha&H18&}{\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}", x - 18, y - 16, ass_rgb(DARK_BG), ass_rgb(BORDER_COLOR), w, w, panel_h, panel_h))
   table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs30\\b1\\bord0\\shad0\\1c%s}%s", x, y, ass_rgb(NEON_GREEN), safe_ass_text(title)))
-  table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs16\\bord0\\shad0\\1c%s}%s", x, y + 36, ass_rgb(TEXT_MUTED), "Up/Down or j/k · Enter select · Esc close"))
+  table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs16\\bord0\\shad0\\1c%s}%s", x, y + 36, ass_rgb(TEXT_MUTED), "Up/Down or j/k \xC2\xB7 Enter select \xC2\xB7 Esc close"))
 
   if #items == 0 then
     table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs22\\bord0\\shad0\\1c%s}No options available", x + 6, y + 68, ass_rgb(TEXT_MUTED)))
@@ -209,8 +209,40 @@ local function build_menu_ass(title, items, selected)
     local border = is_selected and NEON_GREEN or BORDER_COLOR
     local text_color = is_active and NEON_GREEN or TEXT_WHITE
     local prefix = is_active and "* " or "  "
+    
+    local display_label = item.label
+    if item.qualities and type(item.qualities) == "table" and #item.qualities > 0 then
+      local quality_lines = {}
+      for _, q in ipairs(item.qualities) do
+        local qlabel = q.label or "Auto"
+        if q.bandwidth and q.bandwidth > 0 then
+          qlabel = qlabel .. string.format(" (%.1f Mbps)", q.bandwidth / 1000000)
+        end
+        if qlabel == item.label or qlabel == sources_state.currentQuality or q.url == item.url then
+          qlabel = "* " .. qlabel
+        else
+          qlabel = "  " .. qlabel
+        end
+        table.insert(quality_lines, qlabel)
+      end
+      display_label = item.label .. "\\N" .. table.concat(quality_lines, "\\N")
+    elseif item.is_source and item.url and sources_state.candidates then
+      local src = sources_state.candidates and sources_state.candidates[tonumber(item.label:match("^(%d+)"))]
+      if src and src.qualities and type(src.qualities) == "table" and #src.qualities > 0 then
+        local quality_lines = {}
+        for _, q in ipairs(src.qualities) do
+          local qlabel = q.label or "Auto"
+          if q.bandwidth and q.bandwidth > 0 then
+            qlabel = qlabel .. string.format(" (%.1f Mbps)", q.bandwidth / 1000000)
+          end
+          table.insert(quality_lines, "  " .. qlabel)
+        end
+        display_label = item.label .. "\\N" .. table.concat(quality_lines, "\\N")
+      end
+    end
+    
     table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\bord1\\shad0\\1c%s\\3c%s\\alpha&H10&}{\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}", x - 8, row_y - 4, ass_rgb(bg_color), ass_rgb(border), w - 20, w - 20, row_h - 6, row_h - 6))
-    table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs22\\bord0\\shad0\\1c%s}%s%s", x + 6, row_y + 2, ass_rgb(text_color), prefix, safe_ass_text(item.label)))
+    table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs22\\bord0\\shad0\\1c%s}%s%s", x + 6, row_y + 2, ass_rgb(text_color), prefix, safe_ass_text(display_label)))
   end
 
   return table.concat(ass, "\n")
@@ -258,6 +290,7 @@ local function show_menu(menu_type)
           url = q.url,
           headers = q.headers,
           audioUrl = q.audioUrl,
+          audioHeaders = q.audioHeaders,
           selected = is_active,
           is_stream = true,
         })
@@ -278,7 +311,7 @@ local function show_menu(menu_type)
     for idx, c in ipairs(sources_state.candidates) do
       local host = extract_host(c.url)
       local tag = (c.label and c.label ~= "") and c.label or (c.kind or "stream")
-      local label = string.format("%d. %s · %s", idx, host, tag)
+      local label = string.format("%d. %s \xC2\xB7 %s", idx, host, tag)
       if c.audioUrl and c.audioUrl ~= "" then label = label .. " + Audio" end
       local is_active = (c.url == sources_state.currentUrl)
       table.insert(menu_items, {
@@ -286,6 +319,7 @@ local function show_menu(menu_type)
         url = c.url,
         headers = c.headers,
         audioUrl = c.audioUrl,
+        audioHeaders = c.audioHeaders,
         qualities = c.qualities,
         selected = is_active,
         is_stream = true,
@@ -395,6 +429,7 @@ mp.register_script_message("player-menu-show", function(menu_type)
 end)
 
 mp.register_script_message("player-menu-hide", hide_menu)
+
 mp.register_script_message("player-menu-navigate", function(dir)
   navigate_menu(tonumber(dir) or 0)
 end)

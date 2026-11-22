@@ -10,12 +10,35 @@ const CHUNK_RE = /\.(ts|m4s|cmfv|cmfa)(?:$|[?#])/i;
 const AD_RE = /(doubleclick|googlesyndication|adservice|adsystem|pagead|prebid|ads\d*\.|\/ads\/|analytics|tracking|pixel)/i;
 const PIXEL_RE = /(1x1|pixel|spacer|transparent\.gif)/i;
 const SEGMENT_HOST_RE = /(googlevideo\.com|\.m4s$|\.ts$)/i;
-// Audio path segments: /audio/, /audio_ (e.g. audio_1080), /audio-, /audio. plus
-// codec/query hints. Checked BEFORE master so ".../audio/.../index.m3u8" is audio.
 const AUDIO_PLAYLIST_RE = /(?:^|\/)audio(?:[_\-.]|\/|$)|audio_only|audio-only|mp4a|aac|channels=|type=audio/i;
-// Deterministic HLS proxy paths used by hls.shegu.net and similar sites.
 const PROXY_VIDEO_RE = /m3u8_proxy\/video\//i;
 const PROXY_AUDIO_RE = /m3u8_proxy\/audio(?:\/|$)/i;
+const PROXY_PATTERNS = [/\/proxy\//i, /m3u8_proxy/i, /cors-anywhere/i, /\.proxy\./i, /\/proxy\./i];
+
+// Simple UUID generator that works in both browser and Node.js test environments
+function generateId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  // Fallback: RFC4122 v4 UUID using Math.random
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+// Polyfill for chrome.alarms (Node.js test environment compatibility)
+if (typeof chrome === "undefined") {
+  globalThis.chrome = { alarms: {}, runtime: {}, storage: { local: {}, session: {}, sync: {} }, tabs: {}, scripting: {}, cookies: {}, webRequest: {}, contextMenus: {}, action: {}, notifications: {} };
+}
+if (typeof chrome.alarms === "undefined") {
+  chrome.alarms = {
+    create: (_name, _opts) => {},
+    clear: (_name) => {},
+    onAlarm: { addListener: (_fn) => {} }
+  };
+}
 
 const YTDL_HOSTS = [
   "youtube.com",
@@ -43,12 +66,13 @@ function isYtdlPage(url) {
   }
 }
 
-// Score tiers: canonical yt-dlp pages > verified/candidate HLS master
-// playlists > deterministic proxy video sub-playlists > everything else. The
-// gaps exceed every per-stream bonus so a tier can never be overtaken.
-const SCORE_YTDLP = 9000;
+const SCORE_YTDLP = 11000;
+const SCORE_MUXED_MASTER = 7000;
 const SCORE_HLS_MASTER = 5000;
-const SCORE_PROXY_VIDEO = 2800;
+const SCORE_DASH_MPD = 1200;
+const SCORE_PROGRESSIVE = 800;
+const LIVE_SIGNAL_SCORE = 4000;
+const PROXY_PENALTY = -2000;
 
 const PAGE_STREAM_LABEL = "Page Stream via yt-dlp (Best Video + Audio + Captions)";
 
@@ -57,16 +81,26 @@ const manifestResolution = new Map();
 const preResolveInFlight = new Map();
 const liveTraffic = new Map();
 const liveBoostTimers = new Map();
+const chunkManifestMap = new Map();
 
 const MAX_STREAMS_PER_TAB = 15;
 const MANIFEST_PROBE_TIMEOUT_MS = 2500;
 const LIVE_TRAFFIC_TTL_MS = 15000;
-const LIVE_SIGNAL_SCORE = 3500;
 
 function liveTrafficKey(url) {
   try {
     const u = new URL(url);
     return u.host + u.pathname.replace(/\/[^/]*$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function manifestPrefixKey(url) {
+  try {
+    const u = new URL(url);
+    const base = u.pathname.replace(/\/[^/]*$/, "");
+    return u.host + base;
   } catch {
     return "";
   }
@@ -85,6 +119,14 @@ function notifyLiveSegment(tabId, url) {
   map.set(key, now);
   for (const [k, ts] of map) {
     if (now - ts > LIVE_TRAFFIC_TTL_MS) map.delete(k);
+  }
+  const mKey = manifestPrefixKey(url);
+  if (mKey) {
+    const cm = chunkManifestMap.get(tabId);
+    if (!cm) {
+      chunkManifestMap.set(tabId, new Map());
+    }
+    chunkManifestMap.get(tabId).set(key, { manifestKey: mKey, time: now });
   }
   if (!liveBoostTimers.has(tabId)) {
     liveBoostTimers.set(tabId, setTimeout(() => {
@@ -177,7 +219,6 @@ function pageStreamItem(url) {
   };
 }
 
-// Audio-only, junk, and segment entries are not selectable video streams.
 function isDisplayVideo(v) {
   if (!v) return false;
   if (v.kind === "hls-audio-only" || v.kind === "junk" || v.kind === "segment" || v.kind === "chunk") return false;
@@ -199,16 +240,6 @@ function viewState(tabId, pageUrl) {
   };
 }
 
-async function persist(tabId) {
-  const state = getState(tabId);
-  try {
-    await chrome.storage.session.set({ ["tab:" + tabId]: state });
-  } catch {
-    await chrome.storage.local.set({ ["tab:" + tabId]: state });
-  }
-  updateBadge(tabId);
-}
-
 function parseM3U8Attributes(value) {
   const attrs = {};
   const re = /([A-Z0-9-]+)=("[^"]*"|[^,]*)/g;
@@ -223,6 +254,7 @@ function parseManifestInfo(text, baseUrl) {
   const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
   let isMaster = false;
   let hasAudio = false;
+  let isMuxed = false;
   let bestBandwidth = 0;
   let bestVariant = null;
   let bestVariantCodecs = "";
@@ -240,6 +272,10 @@ function parseManifestInfo(text, baseUrl) {
     if (line.startsWith("#EXT-X-STREAM-INF:")) {
       isMaster = true;
       pendingAttrs = parseM3U8Attributes(line.slice("#EXT-X-STREAM-INF:".length));
+      const audioAttr = pendingAttrs.AUDIO;
+      if (audioAttr) {
+        isMuxed = true;
+      }
     } else if (line.startsWith("#EXT-X-MEDIA:")) {
       const attrs = parseM3U8Attributes(line.slice("#EXT-X-MEDIA:".length));
       if (String(attrs.TYPE).toUpperCase() === "AUDIO") {
@@ -304,6 +340,7 @@ function parseManifestInfo(text, baseUrl) {
   return {
     isMaster,
     hasAudio,
+    isMuxed,
     bestBandwidth,
     bestVariant,
     bestVariantCodecs,
@@ -321,13 +358,15 @@ function isAudioPlaylistUrl(url) {
   return AUDIO_PLAYLIST_RE.test(url.toLowerCase());
 }
 
+function isProxyUrl(url) {
+  return PROXY_PATTERNS.some(re => re.test(url));
+}
+
 const audioProbeDone = new Set();
 const audioRecoveryInFlight = new Map();
 const HOT_ATTACH_WINDOW_MS = 15000;
-// tabId "|" videoUrlKey — one live hot-attach per video-only stream per tab.
 const hotAttached = new Set();
 
-// An .m3u8 that is not a known master/audio playlist is treated as video-only.
 function isVideoOnlyVideo(v) {
   if (!v || !/\.m3u8(?:$|[?#])/i.test(v.url || "")) return false;
   if (isAudioPlaylistUrl(v.url)) return false;
@@ -337,7 +376,6 @@ function isVideoOnlyVideo(v) {
   return v.kind === "hls-video-only" || PROXY_VIDEO_RE.test(v.url);
 }
 
-// Register a captured audio playlist/segment so it can be paired with video.
 function addAudioStream(tabId, url, extra) {
   if (!url || tabId == null || tabId < 0) return;
   const state = getState(tabId);
@@ -354,9 +392,6 @@ function addAudioStream(tabId, url, extra) {
     frameId,
   }, (a) => a.url.split("?")[0]);
   state.audioStreams.sort((a, b) => (b.score || 0) - (a.score || 0));
-  // A newly captured audio track (.m3u8 / .aac / .m4a, before, after, or with
-  // a different path ID from the video) pairs with every video-only /
-  // proxy-video entry on this tab, and hot-attaches to a recently launched one.
   pairAllVideoOnly(tabId);
   maybeHotAttachAudio(tabId);
   persist(tabId);
@@ -371,6 +406,17 @@ function inferQualityLabel(url) {
   if (/(720|hd)/i.test(value)) return "720p";
   if (/(480|sd)/i.test(value)) return "480p";
   return "";
+}
+
+function getStreamType(url) {
+  if (!url) return "UNKNOWN";
+  const u = url.toLowerCase();
+  if (u.includes("ytdlp") || u.includes("youtube.com") || u.includes("youtu.be") || u.includes("googlevideo.com")) return "YTDLP";
+  if (u.includes(".m3u8") || u.includes(".m3u")) return "HLS";
+  if (u.includes(".mpd")) return "DASH";
+  if (u.includes(".mp4") || u.includes(".mkv") || u.includes(".webm")) return "DIRECT";
+  if (u.includes("127.0.0.1") || u.includes("localhost")) return "RELAY";
+  return "OTHER";
 }
 
 function buildQualityTiers(video, info) {
@@ -442,7 +488,11 @@ function schedulePreResolve(tabId, url, headers) {
     if (info.isMaster && info.hasAudio) {
       next.kind = "hls-master";
       next.isVerifiedMaster = true;
-      next.score = Math.max(next.score || 0, SCORE_HLS_MASTER);
+      next.isMuxedMaster = info.isMuxed;
+      let baseScore = SCORE_HLS_MASTER;
+      if (info.isMuxed) baseScore = SCORE_MUXED_MASTER;
+      if (isProxyUrl(url)) baseScore += PROXY_PENALTY;
+      next.score = Math.max(next.score || 0, baseScore);
       if (!next.liveBoosted && hasLiveTraffic(tabId, url)) {
         next.liveBoosted = true;
         next.score += LIVE_SIGNAL_SCORE;
@@ -459,9 +509,6 @@ function schedulePreResolve(tabId, url, headers) {
   preResolveInFlight.set(key, promise);
 }
 
-// Query every frame's performance entries for audio playlists that loaded before
-// the service worker woke up, then register them for pairing. Returns the set of
-// all .m3u8/.aac/.m4a resource URLs seen (with and without query string).
 async function harvestFrameAudioResources(tabId) {
   const allUrls = new Set();
   if (tabId == null || tabId < 0) return allUrls;
@@ -477,39 +524,36 @@ async function harvestFrameAudioResources(tabId) {
             if (/\.(m3u8|aac|m4a)(?:$|[?#])/i.test(name)) out.push(name);
           }
         } catch {
-          // performance unavailable in this frame
+          void 0;
         }
         return out;
       },
-    });
-    for (const r of results) {
-      if (!r || r.error) continue;
-      for (const name of (r.result || [])) {
-        if (!name) continue;
-        allUrls.add(name);
-        allUrls.add(name.split("?")[0]);
-        // Only audio playlists/segments are harvested; video playlists are
-        // already captured via webRequest and re-adding them could recurse.
-        if (isAudioPlaylistUrl(name) || PROXY_AUDIO_RE.test(name) || /\.(aac|m4a)(?:$|[?#])/i.test(name)) {
-          addAudioStream(tabId, name, { frameId: r.frameId });
+    }).catch(() => null);
+    if (results) {
+      for (const r of results) {
+        if (!r || r.error) continue;
+        for (const name of (r.result || [])) {
+          if (!name) continue;
+          allUrls.add(name);
+          allUrls.add(name.split("?")[0]);
+          if (isAudioPlaylistUrl(name) || PROXY_AUDIO_RE.test(name) || /\.(aac|m4a)(?:$|[?#])/i.test(name)) {
+            addAudioStream(tabId, name, { frameId: r.frameId });
+          }
         }
       }
     }
   } catch {
-    // scripting/host permission unavailable
+    void 0;
   }
   return allUrls;
 }
 
-// Deterministic proxy sibling: .../m3u8_proxy/video/<rest> -> .../m3u8_proxy/audio/<rest>
 function siblingAudioUrl(videoUrl) {
   if (!videoUrl || !PROXY_VIDEO_RE.test(videoUrl)) return null;
   const sib = videoUrl.replace(/(\/m3u8_proxy\/)video\//i, "$1audio/");
   return sib === videoUrl ? null : sib;
 }
 
-// Popup-open recovery: scan every frame for audio, add the deterministic proxy
-// sibling, then pair it with the video.
 async function recoverAudioForVideo(tabId, videoUrl, headers) {
   const allUrls = await harvestFrameAudioResources(tabId);
   const sib = siblingAudioUrl(videoUrl);
@@ -517,15 +561,11 @@ async function recoverAudioForVideo(tabId, videoUrl, headers) {
     const clean = sib.split("?")[0];
     const present = allUrls.has(sib) || allUrls.has(clean);
     const hasAudio = (getState(tabId).audioStreams || []).length > 0;
-    // Add the sibling when the page referenced it, or when nothing else is captured.
     if (present || !hasAudio) addAudioStream(tabId, sib, { frameId: null, headers });
   }
   rekindleAudioPairing(tabId, videoUrl);
 }
 
-// Re-score every video-only / proxy-video entry on the tab so the
-// highest-bitrate captured audio is attached to all of them, regardless of
-// whether the audio arrived before, after, or with a different path ID.
 function pairAllVideoOnly(tabId) {
   if (tabId == null || tabId < 0) return;
   const state = getState(tabId);
@@ -536,9 +576,6 @@ function pairAllVideoOnly(tabId) {
   }
 }
 
-// Live hot-attach: audio turned up within 15 s of a video-only launch on
-// this tab → forward attachAudio to the native host so the running mpv
-// window hot-loads the track without restarting playback.
 function maybeHotAttachAudio(tabId) {
   if (tabId == null || tabId < 0) return;
   const state = getState(tabId);
@@ -571,7 +608,6 @@ function maybeHotAttachAudio(tabId) {
   rekindleAudioPairing(tabId, video.url);
 }
 
-// Re-run scoring for a video-only stream so a newly captured audio track pairs.
 function rekindleAudioPairing(tabId, url) {
   if (tabId == null || tabId < 0) return;
   const state = getState(tabId);
@@ -585,7 +621,6 @@ function rekindleAudioPairing(tabId, url) {
   persist(tabId);
 }
 
-// Generate candidate parent/master manifest URLs for a video-only sub-playlist.
 function parentMasterCandidates(videoUrl) {
   const candidates = new Set();
   try {
@@ -602,7 +637,7 @@ function parentMasterCandidates(videoUrl) {
       }
     }
   } catch {
-    // invalid URL
+    void 0;
   }
   candidates.delete(videoUrl);
   return [...candidates];
@@ -640,7 +675,6 @@ function looksLikeMasterManifest(text) {
 }
 
 function promoteToMaster(tabId, videoUrl, masterUrl, text, headers) {
-  // Never replace a deterministic proxy video with a probed parent master.
   if (PROXY_VIDEO_RE.test(videoUrl)) return false;
   const state = getState(tabId);
   const idx = state.videos.findIndex(v => v.url.split("?")[0] === videoUrl.split("?")[0]);
@@ -653,14 +687,24 @@ function promoteToMaster(tabId, videoUrl, masterUrl, text, headers) {
       kind: "hls-master",
       verified: true,
       isVerifiedMaster: true,
+      isMuxedMaster: manifestInfo.isMuxed,
       relayReady: true,
       manifestInfo,
       audioUrl: null,
-      score: Math.max(state.videos[idx].score || 0, SCORE_HLS_MASTER),
+      score: Math.max(state.videos[idx].score || 0, manifestInfo.isMuxed ? SCORE_MUXED_MASTER : SCORE_HLS_MASTER),
     headers: { ...(state.videos[idx].headers || {}), ...(headers || {}) },
   };
   state.videos.sort((a, b) => b.score - a.score);
   persist(tabId);
+  
+  const video = state.videos[idx];
+  void prewarmStream(videoUrl, headers, video.audioUrl || null, video.audioHeaders || null, state.page.title || "", {
+    candidateId: video.id || videoUrl,
+    tabId,
+    startTime: video.currentTime || 0,
+    verified: video.verified === true,
+  });
+  
   return true;
 }
 
@@ -682,9 +726,6 @@ async function probeAndPromoteParentMaster(tabId, url, headers) {
   return false;
 }
 
-// Recover audio for a video-only sub-playlist: harvest frame resources, then
-// probe for a parent master manifest that carries audio. Returns the in-flight
-// promise so launch can await a recovery already started by webRequest.
 function ensureAudioRecovery(tabId, url, headers, frameId) {
   if (tabId == null || tabId < 0) return Promise.resolve();
   const key = tabId + "|" + url;
@@ -700,7 +741,6 @@ function ensureAudioRecovery(tabId, url, headers, frameId) {
         if ((getState(tabId).audioStreams || []).length === 0) {
           const sib = siblingAudioUrl(url);
           if (sib) {
-            // Deterministic proxy path: pair the sibling audio directly.
             addAudioStream(tabId, sib, { frameId: null, headers });
           } else {
             await probeAndPromoteParentMaster(tabId, url, headers);
@@ -708,8 +748,17 @@ function ensureAudioRecovery(tabId, url, headers, frameId) {
         }
       }
       rekindleAudioPairing(tabId, url);
+      const video = state.videos.find(v => v.url.split("?")[0] === url.split("?")[0]);
+      if (video && video.audioUrl) {
+        void prewarmStream(video.url, video.headers || {}, video.audioUrl, video.audioHeaders || {}, state.page.title || "", {
+          candidateId: video.id || video.url,
+          tabId,
+          startTime: video.currentTime || 0,
+          verified: video.verified === true,
+        });
+      }
     } catch {
-      // best effort audio recovery
+      void 0;
     } finally {
       audioRecoveryInFlight.delete(key);
     }
@@ -717,15 +766,6 @@ function ensureAudioRecovery(tabId, url, headers, frameId) {
   audioRecoveryInFlight.set(key, promise);
   return promise;
 }
-
-/**
- * Deterministic multi-feature stream scoring & audio pairing with strict master-manifest priority.
- * Resource bounds:
- *   - max 15 tracked streams per tab (LRU eviction)
- *   - max 1 in-flight manifest probe per URL
- *   - 2.5s AbortController timeout
- *   - zero polling loops
- */
 
 function audioGraphScore(videoUrl, audioUrl) {
   try {
@@ -747,7 +787,6 @@ function audioGraphScore(videoUrl, audioUrl) {
   }
 }
 
-// Score a video-only .m3u8 and pair the best available audio track.
 function scoreVideoOnly(url, u, frameId, allVideos, audioStreams, baseScore) {
   let score = baseScore;
 
@@ -761,7 +800,6 @@ function scoreVideoOnly(url, u, frameId, allVideos, audioStreams, baseScore) {
   const bw = /bandwidth[=_](\d+)/i.exec(url);
   if (bw) score += Math.min(Number(bw[1]) / 1e6, 300);
 
-  // Pair the best audio: same frameId first, then any audio captured in the tab.
   const audioPool = [
     ...allVideos.filter(v => v.kind === "hls-audio-only" || isAudioPlaylistUrl(v.url)),
     ...audioStreams,
@@ -802,31 +840,25 @@ function scoreStreamCandidate(url, headers, tabId, allVideos = [], audioStreams 
     return { score: SCORE_YTDLP, kind: "ytdlp", audioUrl: null, manifestInfo: null, frameId: null };
   }
 
-  // Audio-only FIRST (before master): proxy audio ".../m3u8_proxy/audio/.../index.m3u8"
-  // must classify as audio, not master, so it lands in audioStreams and pairs.
   if (isAudioPlaylistUrl(u) || PROXY_AUDIO_RE.test(u)) {
     return { score: 100, kind: "hls-audio-only", audioUrl: null, manifestInfo: null, frameId: frameId };
   }
 
   const liveBonus = hasLiveTraffic(tabId, url) ? LIVE_SIGNAL_SCORE : 0;
 
-  // Deterministic proxy video (.../m3u8_proxy/video/...): keep it the primary
-  // video stream (never replace it with a short stub) and pair the sibling audio.
   if (PROXY_VIDEO_RE.test(u)) {
-    const r = scoreVideoOnly(url, u, frameId, allVideos, audioStreams, SCORE_PROXY_VIDEO);
+    const r = scoreVideoOnly(url, u, frameId, allVideos, audioStreams, SCORE_HLS_MASTER + PROXY_PENALTY);
     return { score: r.score + liveBonus, kind: r.kind, audioUrl: r.audioUrl, manifestInfo: null, frameId: frameId };
   }
 
-  // Video-Only Sub-Playlists - need pairing
   if (/\.m3u8/i.test(u)) {
     const r = scoreVideoOnly(url, u, frameId, allVideos, audioStreams, 500);
     return { score: r.score + liveBonus, kind: r.kind, audioUrl: r.audioUrl, manifestInfo: null, frameId: frameId };
   }
 
-  // DASH MPD
   if (/\.mpd/i.test(u)) {
     kind = "dash";
-    score += 1200;
+    score += SCORE_DASH_MPD;
 
     if (/(2160|4k|uhd)/i.test(u)) score += 400;
     else if (/(1440|2k|qhd)/i.test(u)) score += 300;
@@ -835,19 +867,108 @@ function scoreStreamCandidate(url, headers, tabId, allVideos = [], audioStreams 
     return { score, kind, audioUrl: null, manifestInfo: null, frameId: null };
   }
 
-  // Progressive Direct Media
   if (/\.(mp4|mkv|webm)(?:$|[?#])/i.test(u)) {
     kind = "progressive";
-    score += 800;
+    score += SCORE_PROGRESSIVE;
 
     if (/(2160|4k|uhd)/i.test(u)) score += 400;
-    else if (/(1440|2k|qhd)/i.test(u)) score += 300;
+    else if (/(1440|2k|qhd)/i.test(u)) score += 300
     else if (/(1080|fhd)/i.test(u)) score += 300;
     else if (/(720|hd)/i.test(u)) score += 200;
     return { score, kind, audioUrl: null, manifestInfo: null, frameId: null };
   }
 
   return { score, kind, audioUrl, manifestInfo, frameId };
+}
+
+const livenessCache = new Map();
+const LIVENESS_PROBE_TIMEOUT_MS = 1500;
+
+async function probeLivenessParallel(urls) {
+  const results = new Map();
+  const promises = urls.map(async (url) => {
+    if (livenessCache.has(url)) return { url, ...livenessCache.get(url) };
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), LIVENESS_PROBE_TIMEOUT_MS);
+      const res = await fetch(url, {
+        method: "HEAD",
+        credentials: "include",
+        signal: controller.signal,
+        headers: { "Accept": "*/*" },
+      });
+      clearTimeout(timeout);
+      const ct = res.headers.get("content-type") || "";
+      const isHtml = ct.includes("text/html");
+      let verified = false;
+      let mediaSig = false;
+      if (res.ok && !isHtml) {
+        // Try GET first 2KB for media signatures
+        try {
+          const getRes = await fetch(url, {
+            method: "GET",
+            credentials: "include",
+            headers: { "Range": "bytes=0-2047" },
+            signal: AbortSignal.timeout(LIVENESS_PROBE_TIMEOUT_MS),
+          });
+          const buf = await getRes.arrayBuffer();
+          const text = new TextDecoder("utf-8", { fatal: false }).decode(buf);
+          mediaSig = text.includes("#EXTM3U") || text.includes("#EXT-X-STREAM-INF") || 
+                     text.includes("#EXTINF") || text.includes("<MPD") || 
+                     new Uint8Array(buf)[0] === 0x00 && new Uint8Array(buf)[4] === 0x66 && new Uint8Array(buf)[5] === 0x74 && new Uint8Array(buf)[6] === 0x79 && new Uint8Array(buf)[7] === 0x70; // ftyp
+          verified = getRes.ok && mediaSig;
+        } catch {
+          verified = res.ok && !isHtml;
+        }
+      }
+      const result = { status: res.status, verified, mediaSig, isHtml };
+      livenessCache.set(url, result);
+      if (livenessCache.size > 200) livenessCache.clear(); // simple LRU
+      return { url, ...result };
+    } catch (e) {
+      const result = { status: 0, verified: false, error: String(e) };
+      livenessCache.set(url, result);
+      return { url, ...result };
+    }
+  });
+  const settled = await Promise.allSettled(promises);
+  for (const r of settled) {
+    if (r.status === "fulfilled") results.set(r.value.url, r.value);
+  }
+  return results;
+}
+
+async function enhanceScoresWithLiveness(candidates, _tabId) {
+  const urls = candidates
+    .filter(c => c && c.url && (c.kind === "hls-master" || c.kind === "hls-video-only" || c.kind === "dash" || c.kind === "progressive" || c.url.includes(".m3u8") || c.url.includes(".mpd") || c.url.includes(".mp4") || c.url.includes(".mkv") || c.url.includes(".webm")))
+    .map(c => c.url);
+  if (!urls.length) return candidates;
+  
+  const livenessResults = await probeLivenessParallel(urls);
+  
+  return candidates.map(c => {
+    const liveness = livenessResults.get(c.url);
+    if (!liveness) return c;
+    
+    let newScore = c.score;
+    let newVerified = c.verified;
+    
+    if (liveness.status === 403 || liveness.status === 404) {
+      newScore -= 10000; // disqualify
+    } else if (liveness.verified) {
+      newScore += 5000; // boost verified streams
+      newVerified = true;
+    } else if (liveness.mediaSig) {
+      newScore += 2000; // media signature found
+    }
+    
+    // Penalize proxy wrappers when direct stream exists
+    if (c.url.includes("/m3u8_proxy/") && candidates.some(other => other.url.includes(c.url.replace("/m3u8_proxy/", "/")) && other.verified)) {
+      newScore -= 2500;
+    }
+    
+    return { ...c, score: newScore, verified: newVerified, liveness: { status: liveness.status, verified: liveness.verified, mediaSig: liveness.mediaSig } };
+  });
 }
 
 function isJunkVideo(url, details) {
@@ -884,8 +1005,6 @@ function addVideo(tabId, url, extra) {
 
   const { score, kind, audioUrl } = scoreStreamCandidate(url, headers, tabId, state.videos, state.audioStreams, frameId);
 
-  // Audio-only playlists live in audioStreams, never in the video list, so the
-  // badge/popup show only real video streams and audio pairs cleanly.
   if (kind === "hls-audio-only") {
     upsert(state.audioStreams, {
       url,
@@ -897,8 +1016,6 @@ function addVideo(tabId, url, extra) {
       frameId,
     }, (a) => a.url.split("?")[0]);
     state.audioStreams.sort((a, b) => b.score - a.score);
-    // A newly captured audio track may complete any previously video-only /
-    // proxy-video stream on this tab.
     for (const v of state.videos) {
       if ((v.kind === "hls-video-only" || PROXY_VIDEO_RE.test(v.url)) && !v.audioUrl && !v.playUrl) {
         rekindleAudioPairing(tabId, v.url);
@@ -911,18 +1028,19 @@ function addVideo(tabId, url, extra) {
   }
 
   const videoItem = {
+    id: generateId(),
     url,
+    streamType: getStreamType(url),
     type: (url.match(VIDEO_RE) || [, "stream"])[1].toLowerCase(),
     kind,
     score,
     audioUrl,
+    verified: false,
     time: Date.now(),
     headers,
     frameId,
     liveBoosted: hasLiveTraffic(tabId, url),
   };
-  // Persist playback position reported by content.js so resume works even when
-  // the popup cannot inject (e.g. context-menu launches).
   if (extra && Number.isFinite(Number(extra.currentTime))) videoItem.currentTime = Number(extra.currentTime);
   if (extra && Number.isFinite(Number(extra.duration))) videoItem.duration = Number(extra.duration);
   upsert(state.videos, videoItem, (v) => v.url.split("?")[0]);
@@ -932,16 +1050,34 @@ function addVideo(tabId, url, extra) {
   scheduleWarmLaunch();
   schedulePreResolve(tabId, url, headers);
 
-  // A video-only sub-playlist with no audio yet: recover audio from frames or a
-  // parent master manifest so mpv receives both video and audio.
+  // Non-blocking liveness probe to enhance scores
+  void (async () => {
+    try {
+      const enhanced = await enhanceScoresWithLiveness(state.videos, tabId);
+      if (enhanced && enhanced.length) {
+        state.videos = enhanced;
+        state.videos.sort((a, b) => b.score - a.score);
+        persist(tabId);
+      }
+    } catch {
+      // ignore liveness probe errors
+    }
+  })();
+
+  if (kind === "hls-master" || kind === "hls-video-only" || PROXY_VIDEO_RE.test(url)) {
+    void prewarmStream(url, headers, audioUrl, null, state.page.title || "", {
+      candidateId: videoItem.id || url,
+      tabId,
+      startTime: extra?.currentTime || 0,
+      verified: videoItem.verified === true,
+    });
+  }
+
   if (kind === "hls-video-only" && !audioUrl) {
     void ensureAudioRecovery(tabId, url, headers, frameId);
   }
 }
 
-// Called once the playlist body proved to be a media playlist (no
-// #EXT-X-STREAM-INF): undo a filename-based master guess (root /<id>.m3u8,
-// index.m3u8, master.m3u8) so it pairs with captured audio.
 function demoteRootManifestCandidate(tabId, url) {
   const state = getState(tabId);
   const idx = state.videos.findIndex(v => v.url.split("?")[0] === url.split("?")[0]);
@@ -949,7 +1085,7 @@ function demoteRootManifestCandidate(tabId, url) {
   const v = state.videos[idx];
   if (v.kind !== "hls-master" || v.playUrl) return false;
   const r = scoreVideoOnly(v.url, v.url.toLowerCase(), v.frameId, state.videos, state.audioStreams, 500);
-  state.videos[idx] = { ...v, kind: r.kind, score: r.score, audioUrl: r.audioUrl, isVerifiedMaster: false };
+  state.videos[idx] = { ...v, kind: r.kind, score: r.score, audioUrl: r.audioUrl, isVerifiedMaster: false, isMuxedMaster: false };
   state.videos.sort((a, b) => b.score - a.score);
   persist(tabId);
   return true;
@@ -993,51 +1129,55 @@ async function resolveAndVerifyM3U8(tabId, url, headers) {
       const targetUrl = isMaster && bestVariant ? bestVariant : url;
 
       if (isMaster && bestVariant) {
-        const varResponse = await fetch(bestVariant, {
-          method: "GET",
-          credentials: "include",
-          headers: {
-            "Referer": headers.referer || "",
-            "Origin": headers.origin || "",
-            "User-Agent": headers.userAgent || navigator.userAgent,
-            "Cookie": headers.cookie || "",
-          },
-          signal: AbortSignal.timeout(MANIFEST_PROBE_TIMEOUT_MS),
-        });
-        if (!varResponse.ok) {
-          throw new Error(`Variant fetch failed: ${varResponse.status}`);
-        }
-        const varText = await varResponse.text();
-        const varLines = varText.split("\n");
+        try {
+          const varResponse = await fetch(bestVariant, {
+            method: "GET",
+            credentials: "include",
+            headers: {
+              "Referer": headers.referer || "",
+              "Origin": headers.origin || "",
+              "User-Agent": headers.userAgent || navigator.userAgent,
+              "Cookie": headers.cookie || "",
+            },
+            signal: AbortSignal.timeout(MANIFEST_PROBE_TIMEOUT_MS),
+          });
+          if (!varResponse.ok) {
+            throw new Error(`Variant fetch failed: ${varResponse.status}`);
+          }
+          const varText = await varResponse.text();
+          const varLines = varText.split("\n");
 
-        for (let i = 0; i < varLines.length; i++) {
-          const line = varLines[i].trim();
-          if (line.startsWith("#EXTINF:")) {
-            const nextLine = varLines[i + 1]?.trim();
-            if (nextLine && !nextLine.startsWith("#")) {
-              try {
-                const segmentUrl = new URL(nextLine, bestVariant).toString();
-                const headResponse = await fetch(segmentUrl, {
-                  method: "HEAD",
-                  credentials: "include",
-                  headers: {
-                    "Referer": headers.referer || "",
-                    "Origin": headers.origin || "",
-                    "User-Agent": headers.userAgent || navigator.userAgent,
-                    "Cookie": headers.cookie || "",
-                  },
-                  signal: AbortSignal.timeout(MANIFEST_PROBE_TIMEOUT_MS),
-                });
-                if (headResponse.ok || headResponse.status === 206) {
-                  return { url: targetUrl, verified: true, headers: targetHeaders, manifestInfo };
-                }
-} catch {
+          for (let i = 0; i < varLines.length; i++) {
+            const line = varLines[i].trim();
+            if (line.startsWith("#EXTINF:")) {
+              const nextLine = varLines[i + 1]?.trim();
+              if (nextLine && !nextLine.startsWith("#")) {
+                try {
+                  const segmentUrl = new URL(nextLine, bestVariant).toString();
+                  const headResponse = await fetch(segmentUrl, {
+                    method: "HEAD",
+                    credentials: "include",
+                    headers: {
+                      "Referer": headers.referer || "",
+                      "Origin": headers.origin || "",
+                      "User-Agent": headers.userAgent || navigator.userAgent,
+                      "Cookie": headers.cookie || "",
+                    },
+                    signal: AbortSignal.timeout(MANIFEST_PROBE_TIMEOUT_MS),
+                  });
+                  if (headResponse.ok || headResponse.status === 206) {
+                    return { url: targetUrl, verified: true, headers: targetHeaders, manifestInfo };
+                  }
+                } catch {
                   void 0;
                 }
+              }
             }
           }
+          return { url: targetUrl, verified: false, headers: targetHeaders, manifestInfo };
+        } catch {
+          return { url: targetUrl, verified: false, headers: targetHeaders, manifestInfo };
         }
-        return { url: targetUrl, verified: false, headers: targetHeaders, manifestInfo };
       }
 
       for (let i = 0; i < lines.length; i++) {
@@ -1061,14 +1201,14 @@ async function resolveAndVerifyM3U8(tabId, url, headers) {
               if (headResponse.ok || headResponse.status === 206) {
                 return { url, verified: true, headers: targetHeaders, manifestInfo };
               }
-            } catch {
+} catch {
               void 0;
             }
           }
         }
-      }
 
       return { url, verified: false, headers: targetHeaders, manifestInfo };
+    }
     } catch (err) {
       return { url, verified: false, headers: targetHeaders, error: String(err), manifestInfo: null };
     }
@@ -1188,13 +1328,13 @@ chrome.webRequest.onHeadersReceived.addListener(
               const isMaster = !!(result.manifestInfo && result.manifestInfo.isMaster);
               state.videos[videoIdx] = {
                 ...state.videos[videoIdx],
-                // Keep the master URL as the entry (mpv picks variants itself).
                 url: isMaster ? state.videos[videoIdx].url : result.url,
                 ...(isMaster ? {
                   kind: "hls-master",
                   isVerifiedMaster: true,
+                  isMuxedMaster: result.manifestInfo.isMuxed,
                   audioUrl: null,
-                  score: Math.max(state.videos[videoIdx].score || 0, SCORE_HLS_MASTER),
+                  score: Math.max(state.videos[videoIdx].score || 0, result.manifestInfo.isMuxed ? SCORE_MUXED_MASTER : SCORE_HLS_MASTER),
                 } : {}),
                 verified: true,
                 relayReady: true,
@@ -1206,11 +1346,7 @@ chrome.webRequest.onHeadersReceived.addListener(
             }
           }
           const info = result && result.manifestInfo;
-          // A root-level candidate master whose body is a media playlist (no
-          // #EXT-X-STREAM-INF) is demoted back to a video-only sub-playlist.
           if (info && !info.isMaster) demoteRootManifestCandidate(details.tabId, url);
-          // Content-detected video-only sub-playlist: no audio track in the
-          // manifest itself, so recover audio from frames or a parent master.
           if (info && !info.isMaster && !info.hasAudio) {
             const entry = state.videos.find(v => v.url.split("?")[0] === url.split("?")[0]);
             if ((state.audioStreams || []).length === 0) {
@@ -1248,7 +1384,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       for (const v of msg.videos || []) {
         if (v.src) addVideo(tabId, v.src, { type: "media", frameId: v.frameId, currentTime: v.currentTime, duration: v.duration });
       }
-      // Handle pageResources from content.js performance scraper
       if (msg.pageResources && Array.isArray(msg.pageResources)) {
         state.pageResources = msg.pageResources;
         for (const res of msg.pageResources) {
@@ -1259,7 +1394,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           }
         }
       }
-      // Handle frame resources from content.js
       if (msg.frames && Array.isArray(msg.frames)) {
         for (const frame of msg.frames) {
           const frameId = frame.frameId;
@@ -1302,7 +1436,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return;
     }
     if (msg.type === "scanAudio") {
-      // Popup opened: scan every frame for audio and pair the proxy sibling.
       const id = (msg && msg.tabId != null) ? msg.tabId : tabId;
       const state = getState(id);
       const video = state.videos.find(v => PROXY_VIDEO_RE.test(v.url) && isDisplayVideo(v))
@@ -1321,6 +1454,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const tab = tabs[0];
       const out = await launch(tab, msg.url, msg.action || "play", msg);
       sendResponse(out);
+      return;
+    }
+    if (msg.type === "player:seek") {
+      sendWsMessage({ type: "extension:seek", timePos: msg.timePos });
+      sendResponse({ ok: true });
+      return;
+    }
+    if (msg.type === "player:pause") {
+      sendWsMessage({ type: "extension:pause", paused: msg.paused });
+      sendResponse({ ok: true });
+      return;
+    }
+    if (msg.type === "player:switch-quality") {
+      sendWsMessage({ type: "extension:switch-quality", index: msg.index });
+      sendResponse({ ok: true });
+      return;
+    }
+    if (msg.type === "bridge:getStatus") {
+      // Return current WebSocket bridge status
+      const wsConnected = wsConnection && wsConnection.readyState === WebSocket.OPEN;
+      const candidateCount = 0; // Could track from cached candidates
+      sendResponse({ connected: wsConnected, candidateCount });
       return;
     }
     if (msg.type === "native") {
@@ -1358,12 +1513,104 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse(last || null);
       return;
     }
+    if (msg.type === "extractedStreams") {
+      const state = getState(tabId);
+      const data = msg.data;
+      if (data && data.videoStreams) {
+        state.page.title = data.title || state.page.title;
+        for (const stream of data.videoStreams) {
+          const headers = {
+            referer: state.page.url,
+            origin: new URL(state.page.url).origin,
+            userAgent: navigator.userAgent,
+            cookie: state.cookies,
+          };
+          addVideo(tabId, stream.url, {
+            type: "youtube-extracted",
+            frameId: null,
+            headers,
+            currentTime: 0,
+            duration: stream.approxDuration / 1000,
+          });
+          const videoIdx = state.videos.findIndex(v => v.url.split("?")[0] === stream.url.split("?")[0]);
+          if (videoIdx >= 0) {
+            state.videos[videoIdx] = {
+              ...state.videos[videoIdx],
+              height: stream.height,
+              width: stream.width,
+              bitrate: stream.bitrate,
+              codecs: stream.codecs,
+              qualityLabel: stream.qualityLabel,
+              isVideoOnly: stream.isVideoOnly,
+              itag: stream.itag,
+              fps: stream.fps,
+            };
+          }
+        }
+        if (data.audioStreams && data.audioStreams.length) {
+          for (const audio of data.audioStreams) {
+            const headers = {
+              referer: state.page.url,
+              origin: new URL(state.page.url).origin,
+              userAgent: navigator.userAgent,
+              cookie: state.cookies,
+            };
+            addAudioStream(tabId, audio.url, { headers, frameId: null });
+          }
+        }
+        state.videos.sort((a, b) => b.score - a.score);
+        persist(tabId);
+      }
+      sendResponse({ ok: true });
+      return;
+    }
+    if (msg.type === "manifestUrl") {
+      const state = getState(tabId);
+      const url = msg.url;
+      const playerType = msg.playerType || "unknown";
+      if (url && (url.includes(".m3u8") || url.includes(".mpd"))) {
+        const headers = {
+          referer: state.page.url,
+          origin: new URL(state.page.url).origin,
+          userAgent: navigator.userAgent,
+          cookie: state.cookies,
+        };
+        addVideo(tabId, url, {
+          type: "manifest-hook",
+          frameId: null,
+          headers,
+          playerType,
+        });
+        persist(tabId);
+      }
+      sendResponse({ ok: true });
+      return;
+    }
+    // Manual instant launch from hover pill - TAKEOVER_PAUSE
+    if (msg.type === "TAKEOVER_PAUSE") {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = tabs[0];
+      if (tab && tab.id) {
+        // Find the video in state matching the URL
+        const state = getState(tab.id);
+        const video = state.videos.find(v => v.url.split("?")[0] === (msg.videoUrl || "").split("?")[0]);
+        const startTime = msg.currentTime || (video ? video.currentTime : 0);
+        const duration = msg.duration || (video ? video.duration : 0);
+        const out = await launch(tab, msg.videoUrl || video?.url || tab.url, "play", {
+          startTime,
+          duration,
+          startTimeSource: "hoverPill",
+        });
+        sendResponse(out);
+        return;
+      }
+      sendResponse({ ok: false, error: "no active tab" });
+      return;
+    }
   })();
   return true;
 });
 
-// Resume only from a real mid-playback position: > 3 s in, a finite duration
-// over 15 s, and at least 10 s before the end. Returns whole seconds or 0.
 function resumeStartTime(startTime, duration) {
   const s = Number(startTime);
   const d = Number(duration);
@@ -1392,6 +1639,15 @@ function httpHeaderObject(headers) {
     out[key] = value;
   }
   return out;
+}
+
+async function getDomainCookies(url) {
+  try {
+    const list = await chrome.cookies.getAll({ url });
+    return list.map((c) => c.name + "=" + c.value).join("; ");
+  } catch {
+    return "";
+  }
 }
 
 function bestAudioForVideo(state, video) {
@@ -1423,7 +1679,9 @@ function candidateFromVideo(state, video, titleFallback) {
     ? `${height}p`
     : (inferQualityLabel(video.url) || (() => { try { return new URL(video.url).hostname; } catch { return "Source"; } })());
   return {
+    id: video.id || generateId(),
     url: video.playUrl || video.url,
+    streamType: video.streamType || getStreamType(video.url),
     audioUrl: audio,
     audioHeaders: audioHeaders || {},
     headers: httpHeaderObject(headers),
@@ -1439,6 +1697,7 @@ function candidateFromVideo(state, video, titleFallback) {
     bandwidth,
     codecs: (info && info.bestVariantCodecs) || "",
     score: video.score || 0,
+    verified: video.verified || false,
     qualities: buildQualityTiers(video, info),
   };
 }
@@ -1469,8 +1728,6 @@ async function buildPayload(tab, url, extra) {
   const cfg = (await chrome.storage.sync.get("extension")).extension || {};
   let selectedVideo = state.videos.find(v => v.url.split("?")[0] === selected.split("?")[0]);
 
-  // Launching a video-only sub-playlist: use any already-captured audio
-  // immediately, but never block click-to-launch on network recovery.
   if (selectedVideo && isVideoOnlyVideo(selectedVideo) && !selectedVideo.audioUrl) {
     const bestAudio = bestAudioForVideo(state, selectedVideo);
     if (bestAudio) {
@@ -1483,41 +1740,27 @@ async function buildPayload(tab, url, extra) {
 
   const requestHeaders = selectedVideo?.headers || {};
   const headers = { ...requestHeaders };
-  // The popup recovers playback position from every frame (iframe / Shadow
-  // DOM players) and passes it through; otherwise fall back to the position
-  // content.js last reported for this stream.
   const hasExtraStart = extra && extra.startTime != null && Number.isFinite(Number(extra.startTime));
   const rawStart = hasExtraStart ? Number(extra.startTime) : Number(selectedVideo?.currentTime);
   const rawDuration = hasExtraStart ? Number(extra.duration) : Number(selectedVideo?.duration);
-  // Popup (and content.js) already validate resume positions (>3s, >15s duration, <duration-10s).
-  // Only apply resumeStartTime filter for context-menu / auto-intercept launches that bypass popup.
   const startTime = hasExtraStart ? Math.floor(rawStart) : resumeStartTime(rawStart, rawDuration);
   const duration = Number.isFinite(rawDuration) ? rawDuration : 0;
   
-  // Include manifestInfo for verified master manifests
   const manifestInfo = selectedVideo?.manifestInfo || null;
   const isVerifiedMaster = selectedVideo?.verified === true && selectedVideo?.kind === "hls-master";
   const masterHasAudio = manifestInfo?.hasAudio === true;
   
-  // Use the promoted master URL when the sub-playlist was upgraded to a master.
   const playUrl = selectedVideo?.playUrl || selected;
 
-  // Determine audioUrl: use paired audio from selectedVideo, or find best available audio
-  // if not a verified master manifest with audio track
   let audioUrl = selectedVideo?.audioUrl || null;
   let audioHeaders = null;
   
-  // Only a split video-only HLS sub-playlist needs an external audio track.
-  // Masters (muxed or with #EXT-X-MEDIA audio), yt-dlp pages, DASH, and
-  // progressive files already carry audio and must never get a stray track.
   const needsSeparateAudio = Boolean(selectedVideo) &&
     selectedVideo.kind !== "hls-master" && !(isVerifiedMaster && masterHasAudio) &&
     (selectedVideo.kind === "hls-video-only" || isVideoOnlyVideo(selectedVideo));
   if (!needsSeparateAudio) {
     audioUrl = null;
   } else if (!audioUrl) {
-    // Prefer audioStreams (explicitly captured audio playlists), then fallback to hls-audio-only from videos
-    // Match by same frameId as the video first (like scoreVideoOnly does), then tab-wide best.
     const videoFrameId = selectedVideo?.frameId || null;
     const audioPool = [
       ...(state.audioStreams || []),
@@ -1534,8 +1777,6 @@ async function buildPayload(tab, url, extra) {
     if (orderedAudio.length > 0) {
       const bestAudio = orderedAudio[0];
       audioUrl = bestAudio.url;
-      // Inherit the video session's Cookie/Referer/Origin/UA for every header
-      // the audio response did not carry itself.
       audioHeaders = { ...(selectedVideo?.headers || {}), ...(bestAudio.headers || {}) };
     }
   } else if (audioUrl) {
@@ -1547,6 +1788,15 @@ async function buildPayload(tab, url, extra) {
   const title = (tab && tab.title) || state.page.title || "";
   const candidates = rankedCandidates(state, selectedVideo, title);
   const qualities = selectedVideo ? buildQualityTiers(selectedVideo, manifestInfo) : [];
+
+  // Merge per-domain cookies onto every candidate and its paired audio track
+  const domainCookies = await getDomainCookies(pageUrl);
+  const enrichedCandidates = candidates.map(c => ({
+    ...c,
+    cookies: c.cookies || domainCookies,
+    headers: { ...httpHeaderObject(c.headers || {}), Cookie: c.cookies || domainCookies },
+    audioHeaders: c.audioHeaders ? { ...c.audioHeaders, Cookie: c.audioHeaders.Cookie || domainCookies } : { Cookie: domainCookies },
+  }));
 
   return {
     action: extra && extra.action ? extra.action : "play",
@@ -1566,7 +1816,7 @@ async function buildPayload(tab, url, extra) {
     audioHeaders,
     manifestInfo,
     isVerifiedMaster,
-    candidates,
+    candidates: enrichedCandidates,
     qualities,
   };
 }
@@ -1644,10 +1894,357 @@ async function daemonSend(payload, endpoint) {
   }
 }
 
+// ============================================================================
+// WebSocket Bridge for Real-Time Bidirectional Communication
+// ============================================================================
+
+let wsConnection = null;
+let wsReconnectTimer = null;
+let wsReconnectAttempts = 0;
+let wsHeartbeatAlarm = null;
+const WS_MAX_RECONNECT_ATTEMPTS = 10;
+const WS_BASE_RECONNECT_DELAY_MS = 1000;
+const WS_MAX_RECONNECT_DELAY_MS = 30000;
+
+// PipelineState from daemon (single source of truth)
+let cachedPipelineState = null;
+
+function bgLog(msg) {
+  try { console.log("[" + new Date().toISOString() + "] " + msg); } catch { /* ignore */ }
+}
+
+function getWsUrl() {
+  return new Promise((resolve) => {
+    getDaemonEndpoint().then((endpoint) => {
+      if (endpoint && endpoint.port) {
+        resolve("ws://127.0.0.1:" + endpoint.port + "/ws");
+      } else {
+        resolve(null);
+      }
+    });
+  });
+}
+
+function connectWebSocket() {
+  if (wsConnection && (wsConnection.readyState === WebSocket.OPEN || wsConnection.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  
+  getWsUrl().then((url) => {
+    if (!url) {
+      scheduleWsReconnect();
+      return;
+    }
+    
+    try {
+      wsConnection = new WebSocket(url);
+      wsConnection.binaryType = "arraybuffer";
+      
+      wsConnection.onopen = () => {
+        bgLog("WS bridge connected");
+        wsReconnectAttempts = 0;
+        
+        // Register all active tabs
+        for (const [tabId, state] of tabState) {
+          if (state.videos && state.videos.length > 0) {
+            sendWsMessage({
+              type: "extension:register",
+              tabId: tabId
+            });
+            // Send current candidates for this tab
+            const candidates = state.videos
+              .filter(v => isDisplayVideo(v))
+              .map(v => candidateFromVideo(state, v, state.page.title))
+              .filter(Boolean);
+            const qualities = state.videos[0] ? buildQualityTiers(state.videos[0], state.videos[0].manifestInfo) : [];
+            sendWsMessage({
+              type: "extension:candidates-update",
+              tabId: tabId,
+              candidates,
+              qualities
+            });
+          }
+        }
+        
+        // Request current pipeline state
+        sendWsMessage({ type: "pipeline:getState" });
+        
+        // Start heartbeat alarm
+        if (!wsHeartbeatAlarm) {
+          chrome.alarms.create("empv-ws-heartbeat", { periodInMinutes: 0.25 }); // 15 seconds
+          wsHeartbeatAlarm = true;
+        }
+      };
+      
+      wsConnection.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          handleWsMessage(msg);
+        } catch (err) {
+          bgLog("WS parse error: " + err.message);
+        }
+      };
+      
+      wsConnection.onclose = (event) => {
+        // Handle code 1006 (abnormal closure) - daemon likely restarted on new port
+        const isAbnormalClosure = event.code === 1006;
+        if (isAbnormalClosure) {
+          bgLog("WS bridge abnormal closure (1006), clearing stale daemon endpoint");
+          void clearDaemonEndpoint().then(() => {
+            // Spawn/discover active daemon via Native Messaging
+            void prewarmNative().catch(() => {});
+          });
+        }
+        bgLog("WS bridge closed: " + event.code + " " + event.reason);
+        wsConnection = null;
+        cachedPipelineState = null;
+        if (wsHeartbeatAlarm) {
+          chrome.alarms.clear("empv-ws-heartbeat");
+          wsHeartbeatAlarm = null;
+        }
+        scheduleWsReconnect();
+      };
+      
+      wsConnection.onerror = (err) => {
+        // Suppress noisy console.error during normal backoff reconnects
+        // Only log if we're not already reconnecting
+        if (!wsReconnectTimer && wsReconnectAttempts === 0) {
+          bgLog("WS bridge error: " + (err && err.message));
+        }
+      };
+    } catch (err) {
+      bgLog("WS connection failed: " + err.message);
+      scheduleWsReconnect();
+    }
+  });
+}
+
+function scheduleWsReconnect() {
+  if (wsReconnectTimer) return;
+  const delay = Math.min(
+    WS_BASE_RECONNECT_DELAY_MS * Math.pow(2, wsReconnectAttempts) + Math.random() * 1000,
+    WS_MAX_RECONNECT_DELAY_MS
+  );
+  wsReconnectAttempts = Math.min(wsReconnectAttempts + 1, WS_MAX_RECONNECT_ATTEMPTS);
+  wsReconnectTimer = setTimeout(() => {
+    wsReconnectTimer = null;
+    connectWebSocket();
+  }, delay);
+}
+
+function sendWsMessage(msg) {
+  if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+    try {
+      wsConnection.send(JSON.stringify(msg));
+      return true;
+    } catch (err) {
+      bgLog("WS send error: " + err.message);
+    }
+  }
+  return false;
+}
+
+function handleWsMessage(msg) {
+  switch (msg.type) {
+    case "player:state":
+      // Forward player telemetry to popup and any listeners
+      if (msg.state) {
+        broadcastPlayerTelemetry(msg.state);
+      }
+      break;
+    case "pipeline:state":
+      // Daemon's unified PipelineState - single source of truth
+      if (msg.payload) {
+        cachedPipelineState = msg.payload;
+        // Broadcast to popup and content scripts
+        broadcastPipelineState(msg.payload);
+      }
+      break;
+    case "sniffer:candidates-updated":
+      // Legacy - now handled via pipeline:state
+      break;
+    case "bridge:status":
+      broadcastBridgeStatus(msg.status);
+      break;
+  }
+}
+
+function broadcastPlayerTelemetry(state) {
+  // Store latest telemetry for popup to read
+  chrome.storage.session.set({ "playerTelemetry": { ...state, timestamp: Date.now() } }).catch(() => {});
+  // Notify popup if open
+  chrome.runtime.sendMessage({ type: "player:telemetry", state }).catch(() => {});
+}
+
+function broadcastPipelineState(pipelineState) {
+  // Store for popup to read
+  chrome.storage.session.set({ "pipelineState": { ...pipelineState, timestamp: Date.now() } }).catch(() => {});
+  // Notify popup if open
+  chrome.runtime.sendMessage({ type: "pipeline:state", payload: pipelineState }).catch(() => {});
+  
+  // Send shadowReady to content scripts for hover pill
+  if (pipelineState.tabId != null) {
+    const ready = pipelineState.stage === "SHADOW_READY";
+    chrome.tabs.sendMessage(pipelineState.tabId, { type: "shadowReady", ready }).catch(() => {});
+    
+    const state = getState(pipelineState.tabId);
+    if (pipelineState.candidate) {
+      // Ensure candidate is in our local videos list
+      const existing = state.videos.find(v => v.url.split("?")[0] === pipelineState.candidate.url.split("?")[0]);
+      if (!existing && pipelineState.candidate.url) {
+        addVideo(pipelineState.tabId, pipelineState.candidate.url, {
+          type: "pipeline",
+          headers: pipelineState.candidate.headers || {},
+          currentTime: pipelineState.startTime || 0,
+        });
+      }
+    }
+  }
+}
+
+function broadcastBridgeStatus(status) {
+  chrome.storage.session.set({ "bridgeStatus": { status, timestamp: Date.now() } }).catch(() => {});
+  chrome.runtime.sendMessage({ type: "bridge:status", status }).catch(() => {});
+}
+
+function sendHeartbeat() {
+  sendWsMessage({ type: "extension:heartbeat", timestamp: Date.now() });
+}
+
+// Listen for heartbeat alarm
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "empv-ws-heartbeat") {
+    sendHeartbeat();
+  }
+});
+
+// Push candidate updates to daemon via WebSocket - drives PipelineState transitions
+function pushCandidatesUpdate(tabId, candidates, qualities) {
+  if (!candidates || !candidates.length) return;
+  
+  const topCandidate = candidates[0];
+  const isVerified = topCandidate.verified === true;
+  
+  sendWsMessage({
+    type: "extension:candidates-update",
+    tabId,
+    candidates,
+    qualities
+  });
+  
+  // If we have a verified top candidate and pipeline is in early stage, trigger prewarm
+  if (isVerified && cachedPipelineState) {
+    const stage = cachedPipelineState.stage;
+    if (stage === "SNIFFING" || stage === "PROBING" || stage === "IDLE") {
+      sendWsMessage({
+        type: "extension:candidates-update",
+        tabId,
+        candidates,
+        qualities,
+        // Signal daemon to advance pipeline
+        _triggerPrewarm: true,
+        _candidateId: topCandidate.id,
+        _verified: true,
+      });
+    }
+  }
+}
+
+// Persist tab state to storage and push updates via WebSocket
+async function persist(tabId) {
+  const state = getState(tabId);
+  try {
+    await chrome.storage.session.set({ ["tab:" + tabId]: state });
+  } catch {
+    await chrome.storage.local.set({ ["tab:" + tabId]: state });
+  }
+  updateBadge(tabId);
+  
+  // Push candidate updates to daemon via WebSocket
+  const candidates = state.videos
+    .filter(v => isDisplayVideo(v))
+    .map(v => candidateFromVideo(state, v, state.page.title))
+    .filter(Boolean);
+  const qualities = state.videos[0] ? buildQualityTiers(state.videos[0], state.videos[0].manifestInfo) : [];
+  
+  pushCandidatesUpdate(tabId, candidates, qualities);
+}
+
+// Initialize WebSocket connection on startup
+chrome.runtime.onStartup.addListener(() => {
+  void prewarmNative().catch(() => {});
+  // Delay WS connection slightly to ensure daemon is ready
+  setTimeout(connectWebSocket, 1000);
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  void prewarmNative().catch(() => {});
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: "play-now",
+      title: "Play Now in Enhanced MPV",
+      contexts: ["link", "video", "audio", "page", "selection"],
+    }, () => { void chrome.runtime.lastError; });
+    chrome.contextMenus.create({
+      id: "queue",
+      title: "Queue in MPV",
+      contexts: ["link", "video", "audio", "page", "selection"],
+    }, () => { void chrome.runtime.lastError; });
+    chrome.contextMenus.create({
+      id: "play-link",
+      title: "Play Link in Enhanced MPV",
+      contexts: ["link", "video", "audio"],
+    }, () => { void chrome.runtime.lastError; });
+  });
+  // Connect WS after install
+  setTimeout(connectWebSocket, 1000);
+});
+
+// Also connect when background script loads (for development)
+setTimeout(connectWebSocket, 1000);
+
 async function prewarmNative() {
   const result = await nativeSend({ action: "prewarm" });
   if (result && result.endpoint) await setDaemonEndpoint(result.endpoint);
   return result;
+}
+
+async function prewarmStream(videoUrl, videoHeaders, audioUrl, audioHeaders, title, extra = {}) {
+  const endpoint = await getDaemonEndpoint();
+  if (!endpoint) return { ok: false, error: "no daemon endpoint" };
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = setTimeout(() => controller && controller.abort(), 1000);
+  try {
+    const response = await fetch("http://127.0.0.1:" + endpoint.port + "/prewarm-stream", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-enhanced-mpv-token": endpoint.token,
+      },
+      body: JSON.stringify({ 
+        videoUrl, 
+        videoHeaders: videoHeaders || {}, 
+        audioUrl: audioUrl || null, 
+        audioHeaders: audioHeaders || {}, 
+        title: title || "",
+        candidateId: extra.candidateId || videoUrl,
+        tabId: extra.tabId || 0,
+        startTime: extra.startTime || 0,
+        verified: extra.verified || false,
+      }),
+      signal: controller ? controller.signal : undefined,
+    });
+    if (response.status === 401 || response.status === 403) {
+      await clearDaemonEndpoint();
+      return { ok: false, error: "unauthorized" };
+    }
+    if (!response.ok) throw new Error("prewarm-stream status " + response.status);
+    return await response.json();
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function registerId() {
@@ -1680,7 +2277,29 @@ async function launch(tab, url, action, extra) {
   const state = tab ? getState(tab.id) : null;
   if (state) state.lastLaunch = { time: Date.now(), url: payload.url };
   let result = null;
+  
+  // Try WebSocket first for faster response
   if (payload.action === "play" || payload.action === "queue") {
+    const wsSent = sendWsMessage({
+      type: "extension:play",
+      url: payload.url,
+      title: payload.title,
+      referer: payload.referer,
+      userAgent: payload.userAgent,
+      cookies: payload.cookies,
+      headers: payload.headers,
+      audioUrl: payload.audioUrl,
+      audioHeaders: payload.audioHeaders,
+      startTime: payload.startTime,
+      candidates: payload.candidates,
+      qualities: payload.qualities
+    });
+    
+    if (wsSent) {
+      // WebSocket sent, wait a bit for response or fall back
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
     const endpoint = await getDaemonEndpoint();
     result = await daemonSend(payload, endpoint);
   }
@@ -1714,6 +2333,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabState.delete(tabId);
   liveTraffic.delete(tabId);
+  chunkManifestMap.delete(tabId);
   const timer = liveBoostTimers.get(tabId);
   if (timer) clearTimeout(timer);
   liveBoostTimers.delete(tabId);
@@ -1742,31 +2362,9 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
   }
 });
 
-chrome.runtime.onInstalled.addListener(() => {
-  void prewarmNative().catch(() => {});
-  chrome.contextMenus.removeAll(() => {
-    chrome.contextMenus.create({
-      id: "play-now",
-      title: "Play Now in Enhanced MPV",
-      contexts: ["link", "video", "audio", "page", "selection"],
-    });
-    chrome.contextMenus.create({
-      id: "queue",
-      title: "Queue in MPV",
-      contexts: ["link", "video", "audio", "page", "selection"],
-    });
-    chrome.contextMenus.create({
-      id: "play-link",
-      title: "Play Link in Enhanced MPV",
-      contexts: ["link", "video", "audio"],
-    });
-  });
-});
-
 chrome.runtime.onStartup.addListener(() => {
   void prewarmNative().catch(() => {});
 });
-
 
 chrome.storage.sync.get("extension", (data) => {
   void data;

@@ -48,6 +48,18 @@
         "<all_urls>"
       ],
       "js": [
+        "content-extractor.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
         "media-hook.js"
       ],
       "run_at": "document_start",

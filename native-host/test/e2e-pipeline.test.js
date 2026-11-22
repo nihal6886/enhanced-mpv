@@ -46,7 +46,7 @@ test.afterEach(() => {
 
 // -------------------------------------------------------- test server ----
 
-function createAuthHlsServer(videoManifest, audioManifest = "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:10,\naudio-seg.ts\n", segmentContent = "segment-data") {
+function createAuthHlsServer(videoManifest, audioManifest = "#EXTM3U\n#EXT-X-VERSION:4\n#EXTINF:10,\naudio-seg.ts\n", segmentContent = "segment-data") {
   return createTestServer((req, res) => {
     const referer = req.headers.referer || "";
     const cookie = req.headers.cookie || "";
@@ -76,7 +76,7 @@ function createAuthHlsServer(videoManifest, audioManifest = "#EXTM3U\n#EXT-X-VER
 }
 
 const AUDIO_MANIFEST = `#EXTM3U
-#EXT-X-VERSION:3
+#EXT-X-VERSION:4
 #EXTINF:10,
 audio-seg-1.ts
 #EXTINF:10,
@@ -85,7 +85,7 @@ audio-seg-2.ts
 `;
 
 const MASTER_MANIFEST = `#EXTM3U
-#EXT-X-VERSION:3
+#EXT-X-VERSION:4
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",AUTOSELECT=YES,DEFAULT=YES,URI="audio.m3u8"
 #EXT-X-STREAM-INF:BANDWIDTH=5000000,AUDIO="audio",RESOLUTION=1920x1080
 video.m3u8

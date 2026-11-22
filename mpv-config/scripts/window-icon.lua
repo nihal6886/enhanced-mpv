@@ -7,7 +7,7 @@
 
   Native mpv owns the window directly; this script applies the custom icon and
   reinforces the Enhanced MPV title on startup and when the media title changes.
-  On Windows 11, applies DWM dark titlebar (#0E1014) and thin neon-green (#4ADE80)
+  On Windows 11, applies DWM dark titlebar (#0D1117) and thin neon-green (#4ADE80)
   window border accent via DwmSetWindowAttribute.
 
   Windows only. On macOS / Linux, or on any Lua build without LuaJIT FFI, the
@@ -44,6 +44,11 @@ local DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 local DWMWA_CAPTION_COLOR = 35
 local DWMWA_BORDER_COLOR = 34
 
+-- Foreground focus constants
+local SW_SHOW = 5
+local SW_SHOWNORMAL = 1
+local ATTACH_THREAD_INPUT = 0x00000001
+
 local declared = pcall(function()
   ffi.cdef([[
     void* LoadImageW(void* hInst, const void* name, unsigned int type,
@@ -59,9 +64,11 @@ local declared = pcall(function()
                      int cx, int cy, unsigned int uFlags);
     int SetForegroundWindow(void* hWnd);
     unsigned int GetCurrentProcessId(void);
+    unsigned int GetCurrentThreadId(void);
     unsigned long GetWindowThreadProcessId(void* hWnd, void* lpdwProcessId);
     int EnumWindows(void* lpEnumFunc, void* lParam);
     int IsWindowVisible(void* hWnd);
+    int AttachThreadInput(unsigned int idAttach, unsigned int idAttachTo, int fAttach);
     // DWM API for Windows 11 window chrome theming
     long DwmSetWindowAttribute(void* hwnd, unsigned int attr,
                                const void* pvAttribute, unsigned int cbAttribute);
@@ -76,9 +83,9 @@ local loaded_kernel32, kernel32 = pcall(ffi.load, "kernel32")
 if not loaded_kernel32 then return end
 
 local loaded_dwmapi, dwmapi = pcall(ffi.load, "dwmapi")
--- dwmapi may not be available on older Windows; we fail silently if so.
 
 local self_pid = tonumber(kernel32.GetCurrentProcessId())
+local self_tid = tonumber(kernel32.GetCurrentThreadId())
 local cached_icon_small = nil
 local cached_icon_big = nil
 local cached_icon_path = nil
@@ -127,6 +134,12 @@ local function pid_of(hwnd)
   return tonumber(buf[0])
 end
 
+local function tid_of(hwnd)
+  local buf = ffi.new("unsigned long[1]")
+  user32.GetWindowThreadProcessId(ffi.cast("void*", hwnd), buf)
+  return tonumber(buf[0])
+end
+
 -- Kept at module scope: EnumWindows holds a raw pointer to the callback, so the
 -- cdata must outlive the call.
 local enum_hit = 0
@@ -169,12 +182,27 @@ local function find_window()
 end
 
 local function icon_path()
-  local p = mp.command_native({ "expand-path", "~~/enhanced-mpv.ico" })
-  if not p or p == "" then return nil end
-  local f = io.open(p, "rb")
-  if not f then return nil end
-  f:close()
-  return p
+  local candidates = {
+    mp.command_native({ "expand-path", "~~/enhanced-mpv.ico" }),
+    (os.getenv("USERPROFILE") or "") .. "\\.enhanced-mpv\\enhanced-mpv.ico",
+    (os.getenv("LOCALAPPDATA") or "") .. "\\Programs\\Enhanced MPV\\mpv\\enhanced-mpv.ico",
+  }
+  -- Also check the mpv executable directory
+  local mpv_bin = mp.get_property("mpv-bin")
+  if mpv_bin and mpv_bin ~= "" then
+    local dir = mpv_bin:match("(.+)[\\/][^\\/]+$")
+    if dir then table.insert(candidates, dir .. "\\enhanced-mpv.ico") end
+  end
+  for _, p in ipairs(candidates) do
+    if p and p ~= "" then
+      local f = io.open(p, "rb")
+      if f then
+        f:close()
+        return p
+      end
+    end
+  end
+  return nil
 end
 
 local function title_text()
@@ -200,7 +228,7 @@ local function apply_icon(hwnd, path)
   end
 end
 
--- Apply DWM dark titlebar (#0E1014) and neon-green border (#4ADE80) on Windows 11
+-- Apply DWM dark titlebar (#0D1117) and neon-green border (#4ADE80) on Windows 11
 local function apply_dwm_theme(hwnd)
   if dwm_applied or not loaded_dwmapi then return end
   local h = ffi.cast("void*", hwnd)
@@ -209,8 +237,8 @@ local function apply_dwm_theme(hwnd)
   pcall(function()
     dwmapi.DwmSetWindowAttribute(h, DWMWA_USE_IMMERSIVE_DARK_MODE, dark, 4)
   end)
-  -- Titlebar background color: #0E1014 (dark studio) -> 0x14100E in ABGR
-  local caption_color = ffi.new("unsigned int[1]", 0x14100E)
+  -- Titlebar background color: #0D1117 (dark studio) -> 0x17110D in ABGR
+  local caption_color = ffi.new("unsigned int[1]", 0x17110D)
   pcall(function()
     dwmapi.DwmSetWindowAttribute(h, DWMWA_CAPTION_COLOR, caption_color, 4)
   end)
@@ -222,18 +250,36 @@ local function apply_dwm_theme(hwnd)
   dwm_applied = true
 end
 
--- Reveal window to foreground immediately: ShowWindow + SetWindowPos + SetForegroundWindow
-local function reveal_window(hwnd)
-  if window_revealed then return end
+-- Force foreground focus using AttachThreadInput + SetForegroundWindow
+local function force_foreground(hwnd)
   local h = ffi.cast("void*", hwnd)
   pcall(function()
+    -- Get the foreground window's thread ID
+    local fg_hwnd = user32.GetForegroundWindow()
+    if fg_hwnd ~= nil then
+      local fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, nil)
+      -- Attach our thread input to the foreground thread
+      user32.AttachThreadInput(self_tid, tonumber(fg_tid), 1)
+    end
+    -- Show and bring to front
     user32.ShowWindow(h, SW_RESTORE)
     user32.SetWindowPos(h, ffi.cast("void*", HWND_TOPMOST), 0, 0, 0, 0,
       SWP_NOSIZE + SWP_NOMOVE + SWP_SHOWWINDOW)
     user32.SetWindowPos(h, ffi.cast("void*", HWND_NOTOPMOST), 0, 0, 0, 0,
       SWP_NOSIZE + SWP_NOMOVE + SWP_SHOWWINDOW)
     user32.SetForegroundWindow(h)
+    -- Detach thread input
+    if fg_hwnd ~= nil then
+      local fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, nil)
+      user32.AttachThreadInput(self_tid, tonumber(fg_tid), 0)
+    end
   end)
+end
+
+-- Reveal window to foreground immediately: ShowWindow + SetWindowPos + SetForegroundWindow
+local function reveal_window(hwnd)
+  if window_revealed then return end
+  force_foreground(hwnd)
   window_revealed = true
 end
 
@@ -257,6 +303,12 @@ end
 -- Handle script-message bring-to-front from mpv-launcher.js (a reused window
 -- must surface again even after it was revealed once).
 mp.register_script_message("bring-to-front", function()
+  window_revealed = false
+  pcall(do_apply)
+end)
+
+-- Handle enhanced-mpv-focus message for instant foreground focus on loadfile
+mp.register_script_message("enhanced-mpv-focus", function()
   window_revealed = false
   pcall(do_apply)
 end)

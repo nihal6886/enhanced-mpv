@@ -245,12 +245,14 @@ function authHeaderObject(audioHeaders) {
 }
 
 const FAST_START_OPTIONS = {
-  "demuxer-lavf-analyzeduration": "0.5",
-  "demuxer-lavf-probesize": "500000",
+  "demuxer-lavf-analyzeduration": "0.1",
+  "demuxer-lavf-probesize": "32768",
   "cache": "yes",
   "cache-secs": "15",
   "demuxer-readahead-secs": "5",
   "hls-bitrate": "max",
+  "cache-pause-initial": "no",
+  "initial-audio-sync": "no",
 };
 
 function buildArgs(payload, subFiles, _mpvBin) {
@@ -555,8 +557,10 @@ function redactStderr(text) {
 
 function spawnMpv(mpvBin, args, spawnStartMs) {
   ensureDir(configDir());
+  const logFile = path.join(configDir(), "mpv-runtime.log");
+  const mpvArgs = [...args, "--log-file=" + logFile];
   const started = spawnStartMs || Date.now();
-  const child = spawn(mpvBin, args, {
+  const child = spawn(mpvBin, mpvArgs, {
     detached: true,
     stdio: ["ignore", "ignore", "pipe"],
     windowsHide: false, // MUST be false for instant foreground window
@@ -571,7 +575,7 @@ function spawnMpv(mpvBin, args, spawnStartMs) {
   }
   const spawnMs = Date.now() - started;
   appendLaunchLog("[" + new Date().toISOString() + "] spawn_ms=" + spawnMs + " " +
-    JSON.stringify(publicCommand(mpvBin, args)));
+    JSON.stringify(publicCommand(mpvBin, mpvArgs)));
   let stderrBuffer = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => {
@@ -623,6 +627,8 @@ const PER_FILE_OPTIONS = new Set([
   "cache-secs",
   "demuxer-readahead-secs",
   "hls-bitrate",
+  "cache-pause-initial",
+  "initial-audio-sync",
 ]);
 
 function loadfilePlan(args) {
@@ -661,24 +667,52 @@ function loadfilePlan(args) {
  // track travels with the playlist entry, so queued items keep theirs too.
  // Rejects when mpv refuses the command (e.g. mpv < 0.38 without the index
  // argument) so the caller can fall back to a clean respawn.
- async function loadFileIpc(url, mode, startTime, target, extra) {
-   const opts = extra || {};
-   const options = { ...(opts.options || {}) };
-   // Popup/content.js already validate resume positions (>3s, >15s duration, <duration-10s).
-   // Only apply resumeStart filter for context-menu / auto-intercept launches that bypass popup.
-   const start = (opts.startTimeSource && opts.startTimeSource !== "none") ? Math.floor(startTime) : resumeStart(startTime, opts.duration);
-   // Always explicit: an unset start would inherit a CLI --start from the
-   // original spawn or let watch-later resume override the browser position.
-   options.start = start > 0 ? String(start) : "none";
-   const r = await sendIpc(["loadfile", url, mode, -1, options], target, 3000);
-   if (!r || r.error !== "success") {
-     throw new Error("ipc loadfile rejected: " + String(r && r.error));
-   }
-   if (mode !== "append" && mode !== "append-play") {
-     await sendIpc(["set_property", "pause", false], target, 500).catch(() => {});
-   }
-   return true;
- }
+async function loadFileIpc(url, mode, startTime, target, extra) {
+    const opts = extra || {};
+    const options = { ...(opts.options || {}) };
+    // Popup/content.js already validate resume positions (>3s, >15s duration, <duration-10s).
+    // Only apply resumeStart filter for context-menu / auto-intercept launches that bypass popup.
+    const start = (opts.startTimeSource && opts.startTimeSource !== "none") ? Math.floor(startTime) : resumeStart(startTime, opts.duration);
+    // Always explicit: an unset start would inherit a CLI --start from the
+    // original spawn or let watch-later resume override the browser position.
+    options.start = start > 0 ? String(start) : "none";
+
+    // 1. Open window immediately: force-window=yes, focus, loading screen BEFORE loadfile
+    //    Guaranteed IPC execution order with JSON reply verification
+    await sendIpc(["set_property", "force-window", "yes"], target, 300);
+    await sendIpc(["set_property", "pause", false], target, 300);
+    await sendIpc(["set_property", "window-minimized", false], target, 300);
+
+    // 2. Fire the loading-screen splash AND focus message (60 fps ASS overlay) while ytdl_hook resolves
+    await sendScriptMessage("enhanced-mpv-focus", target, 300);
+    await sendScriptMessage("enhanced-mpv-loading", target, 300);
+
+    // 3. Load the file with per-file options. Log exact IPC command and response.
+    const loadfileCmd = ["loadfile", url, mode, -1, options];
+    appendLaunchLog("[" + new Date().toISOString() + "] loadFileIpc loadfile cmd: " + JSON.stringify(loadfileCmd));
+    let r = await sendIpc(loadfileCmd, target, 3000);
+    appendLaunchLog("[" + new Date().toISOString() + "] loadFileIpc loadfile resp: " + JSON.stringify(r));
+    if (!r || r.error !== "success") {
+      const errMsg = String(r && r.error);
+      appendLaunchLog("[" + new Date().toISOString() + "] loadfile with index failed: " + errMsg);
+      if (errMsg.includes("invalid parameter")) {
+        appendLaunchLog("[" + new Date().toISOString() + "] retrying loadfile without index (older mpv)");
+        const loadfileCmdNoIdx = ["loadfile", url, mode, options];
+        appendLaunchLog("[" + new Date().toISOString() + "] loadfile cmd (no idx): " + JSON.stringify(loadfileCmdNoIdx));
+        r = await sendIpc(loadfileCmdNoIdx, target, 3000);
+        appendLaunchLog("[" + new Date().toISOString() + "] loadfile resp (no idx): " + JSON.stringify(r));
+        if (!r || r.error !== "success") {
+          throw new Error("ipc loadfile rejected (no index): " + String(r && r.error));
+        }
+      } else {
+        throw new Error("ipc loadfile rejected: " + errMsg);
+      }
+    }
+    if (mode !== "append" && mode !== "append-play") {
+      await sendIpc(["set_property", "pause", false], target, 500).catch(() => {});
+    }
+    return true;
+  }
 
 async function replaceViaIpc(payload, args, target, wantQueue) {
   const plan = loadfilePlan(args);
@@ -697,9 +731,6 @@ async function replaceViaIpc(payload, args, target, wantQueue) {
   });
   if (wantQueue) return;
   await Promise.allSettled([
-    sendIpc(["set_property", "force-window", "yes"], target, 300),
-    sendIpc(["set_property", "window-minimized", false], target, 300),
-    sendIpc(["set_property", "pause", false], target, 300),
     sendScriptMessage("bring-to-front", target),
   ]);
   // Portable raise for X11/Wayland/macOS (window-icon.lua only raises on
@@ -1114,11 +1145,11 @@ async function videoParamsReady(target, playUrl) {
 }
 
 async function monitorAndFailover(payload, playUrl, target, fallbacks, mode, depth) {
-  if (!fallbacks.length || depth >= 2) return;
-  const deadline = Date.now() + 3500;
-  const probe = probeCandidate(fallbacks[0], 3000);
+  if (!fallbacks.length || depth >= 3) return;
+  const deadline = Date.now() + 1500;
+  const probe = probeCandidate(fallbacks[0], 2000);
   while (Date.now() < deadline) {
-    await delay(200);
+    await delay(100);
     const ready = await videoParamsReady(target, playUrl);
     if (ready === true) return;
     const currentPath = await sendIpc(["get_property", "path"], target, 250).catch(() => null);
@@ -1175,19 +1206,39 @@ async function fastDispatch(payload, mode) {
       : resumeStart(payload.startTime, payload.duration);
     options.start = start > 0 ? String(start) : "none";
     const dispatchedAt = Date.now();
-    const r = await sendIpc(["loadfile", launchPayload.url, wantQueue ? "append-play" : "replace", -1, options], target, 1200);
+
+    // 1. Open window immediately: force-window=yes, focus, loading screen BEFORE loadfile
+    //    Guaranteed IPC execution order with JSON reply verification
+    await sendIpc(["set_property", "force-window", "yes"], target, 300);
+    await sendIpc(["set_property", "pause", false], target, 300);
+    await sendIpc(["set_property", "window-minimized", false], target, 300);
+
+    // 2. Fire the loading-screen splash AND focus message (60 fps ASS overlay) while ytdl_hook resolves
+    await sendScriptMessage("enhanced-mpv-focus", target, 300);
+    await sendScriptMessage("enhanced-mpv-loading", target, 300);
+
+    // 3. Load the file with per-file options. Log exact IPC command and response.
+    const loadfileCmd = ["loadfile", launchPayload.url, wantQueue ? "append-play" : "replace", -1, options];
+    appendLaunchLog("[" + new Date().toISOString() + "] fast_dispatch loadfile cmd: " + JSON.stringify(loadfileCmd));
+    let r = await sendIpc(loadfileCmd, target, 1200);
+    appendLaunchLog("[" + new Date().toISOString() + "] fast_dispatch loadfile resp: " + JSON.stringify(r));
     if (!r || r.error !== "success") {
-      throw new Error("ipc loadfile rejected: " + String(r && r.error));
+      const errMsg = String(r && r.error);
+      appendLaunchLog("[" + new Date().toISOString() + "] fast_dispatch loadfile with index failed: " + errMsg);
+      if (errMsg.includes("invalid parameter")) {
+        appendLaunchLog("[" + new Date().toISOString() + "] fast_dispatch retrying loadfile without index (older mpv)");
+        const loadfileCmdNoIdx = ["loadfile", launchPayload.url, wantQueue ? "append-play" : "replace", options];
+        appendLaunchLog("[" + new Date().toISOString() + "] fast_dispatch loadfile cmd (no idx): " + JSON.stringify(loadfileCmdNoIdx));
+        r = await sendIpc(loadfileCmdNoIdx, target, 1200);
+        appendLaunchLog("[" + new Date().toISOString() + "] fast_dispatch loadfile resp (no idx): " + JSON.stringify(r));
+        if (!r || r.error !== "success") {
+          throw new Error("ipc loadfile rejected (no index): " + String(r && r.error));
+        }
+      } else {
+        throw new Error("ipc loadfile rejected: " + errMsg);
+      }
     }
     const dispatchMs = Date.now() - dispatchedAt;
-    if (!wantQueue) {
-      void Promise.allSettled([
-        sendIpc(["set_property", "pause", false], target, 300),
-        sendIpc(["set_property", "force-window", "yes"], target, 300),
-        sendIpc(["set_property", "window-minimized", false], target, 300),
-        sendScriptMessage("bring-to-front", target),
-      ]);
-    }
     void materializeSubtitles(payload)
       .then((files) => attachSubtitlesWhenReady(files, target))
       .catch((err) => {
