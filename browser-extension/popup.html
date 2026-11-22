@@ -7,30 +7,53 @@
   <link rel="stylesheet" href="theme.css" />
   <style>
     :root {
-      --term-font: "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-      --ui-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-      --bg-canvas: #07080a;
-      --grid-line: rgba(255, 255, 255, 0.036);
-      --neon-emerald: rgba(48, 209, 88, 0.16);
-      --neon-cyan: rgba(100, 210, 255, 0.1);
-      --neon-rim: rgba(48, 209, 88, 0.28);
-      --term-black: #000000;
-      --term-elevated: #0a0a0c;
-      --term-input: #050507;
-      --term-hover: #121215;
-      --border: #242428;
-      --border-bright: #3c3c42;
-      --text: #f2f2f7;
-      --muted: #8e8e93;
-      --dim: #636366;
-      --green: #30d158;
-      --green-soft: rgba(48, 209, 88, 0.14);
-      --green-border: rgba(48, 209, 88, 0.45);
+      --term-font: "SF Mono", "JetBrains Mono", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --ui-font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Inter", "Helvetica Neue", sans-serif;
+
+      /* Ultra-Deep Obsidian & Machined Aluminum Surface System */
+      --bg-canvas: #040507;
+      --term-black: #07080b;
+      --term-surface: rgba(15, 18, 24, 0.78);
+      --term-elevated: rgba(22, 26, 35, 0.88);
+      --term-hover: rgba(30, 35, 46, 0.94);
+      --term-input: rgba(6, 8, 11, 0.82);
+
+      /* Specular Hairline Borders */
+      --border: rgba(255, 255, 255, 0.085);
+      --border-subtle: rgba(255, 255, 255, 0.045);
+      --border-bright: rgba(255, 255, 255, 0.17);
+      --border-specular: rgba(255, 255, 255, 0.24);
+
+      /* Typography Hierarchy */
+      --text: #f7f8fa;
+      --text-secondary: #cfd3dc;
+      --muted: #8b919e;
+      --dim: #5d6370;
+
+      /* High-Precision Signal Accents */
+      --green: #32d74b;
+      --green-bright: #52ee6b;
+      --green-deep: #1fa836;
+      --green-soft: rgba(50, 215, 75, 0.12);
+      --green-glow: rgba(50, 215, 75, 0.34);
+      --green-border: rgba(50, 215, 75, 0.45);
+
       --cyan: #64d2ff;
+      --cyan-soft: rgba(100, 210, 255, 0.11);
+      --cyan-border: rgba(100, 210, 255, 0.32);
+
       --amber: #ffd60a;
+      --amber-soft: rgba(255, 214, 10, 0.12);
+      --amber-border: rgba(255, 214, 10, 0.38);
+
       --red: #ff453a;
-      --red-soft: rgba(255, 69, 58, 0.12);
-      --red-border: rgba(255, 69, 58, 0.4);
+      --red-soft: rgba(255, 69, 58, 0.13);
+      --red-border: rgba(255, 69, 58, 0.42);
+
+      --radius-window: 14px;
+      --radius-card: 10px;
+      --radius-item: 7px;
+      --radius-btn: 7px;
     }
 
     *,
@@ -46,13 +69,13 @@
       padding: 0 !important;
       width: 100%;
       max-width: none !important;
-      min-width: 340px;
+      min-width: 372px;
       min-height: auto;
       background-color: var(--bg-canvas) !important;
       color: var(--text) !important;
       font-family: var(--term-font) !important;
       font-size: 11.5px;
-      line-height: 1.4;
+      line-height: 1.45;
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
     }
@@ -61,12 +84,12 @@
       position: relative;
       display: grid;
       place-items: center;
-      padding: 8px !important;
+      padding: 10px !important;
       overflow-x: hidden;
       background: transparent !important;
     }
 
-    /* Full-Viewport Animated Gemini Aurora + Grid Canvas */
+    /* Full-Viewport Neural Aurora & Isometric Micro-Grid Canvas */
     #geminiBgCanvas {
       position: fixed;
       inset: 0;
@@ -78,84 +101,106 @@
       background-color: var(--bg-canvas);
     }
 
-    @keyframes geminiBorderGlow {
+    @keyframes studioFrameAura {
       0%, 100% {
         box-shadow:
-          0 28px 75px -12px rgba(0, 0, 0, 0.96),
-          0 0 0 0.5px rgba(255, 255, 255, 0.14),
-          0 0 0 1px rgba(48, 209, 88, 0.34),
-          0 0 46px -8px rgba(48, 209, 88, 0.28);
+          0 34px 90px -16px rgba(0, 0, 0, 0.98),
+          0 0 0 1px rgba(255, 255, 255, 0.12),
+          inset 0 1px 0 rgba(255, 255, 255, 0.18),
+          0 0 42px -12px rgba(50, 215, 75, 0.25);
       }
       50% {
         box-shadow:
-          0 28px 75px -12px rgba(0, 0, 0, 0.96),
-          0 0 0 0.5px rgba(255, 255, 255, 0.18),
-          0 0 0 1px rgba(100, 210, 255, 0.4),
-          0 0 58px -6px rgba(100, 210, 255, 0.2),
-          0 0 46px -6px rgba(48, 209, 88, 0.34);
+          0 34px 90px -16px rgba(0, 0, 0, 0.98),
+          0 0 0 1px rgba(100, 210, 255, 0.24),
+          inset 0 1px 0 rgba(255, 255, 255, 0.24),
+          0 0 54px -10px rgba(100, 210, 255, 0.18),
+          0 0 42px -10px rgba(50, 215, 75, 0.3);
       }
     }
 
-    /* Authentic macOS Terminal.app Window Frame */
+    /* Main Machined Glass Console Frame */
     main.terminal-window {
       position: relative;
       z-index: 1;
       width: 100%;
-      max-width: 380px;
+      max-width: 412px;
       margin: auto;
-      background: var(--term-black) !important;
-      border: 1px solid #454549 !important;
-      border-radius: 9px;
+      background:
+        radial-gradient(120% 80% at 50% 0%, rgba(50, 215, 75, 0.06) 0%, transparent 55%),
+        linear-gradient(180deg, rgba(16, 19, 25, 0.96) 0%, rgba(8, 10, 14, 0.99) 100%) !important;
+      backdrop-filter: blur(28px) saturate(140%);
+      -webkit-backdrop-filter: blur(28px) saturate(140%);
+      border: 1px solid rgba(255, 255, 255, 0.13) !important;
+      border-radius: var(--radius-window);
       overflow: hidden;
-      animation: geminiBorderGlow 5.5s ease-in-out infinite;
+      animation: studioFrameAura 6.5s ease-in-out infinite;
     }
 
-    /* Authentic macOS Dark Aqua Titlebar */
+    /* Subtle Top Edge Specular Highlight */
+    main.terminal-window::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 12%;
+      right: 12%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(82, 238, 107, 0.55), rgba(100, 210, 255, 0.5), transparent);
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    /* macOS Sequoia Dark Translucent Titlebar */
     .titlebar {
       display: grid;
-      grid-template-columns: 64px 1fr 64px;
+      grid-template-columns: 68px 1fr 68px;
       align-items: center;
-      height: 24px;
-      padding: 0 10px;
-      background: linear-gradient(180deg, #3a3a3d 0%, #2c2c2f 52%, #242427 100%);
-      border-top: 1px solid rgba(255, 255, 255, 0.14);
-      border-bottom: 1px solid #0e0e10;
+      height: 30px;
+      padding: 0 13px;
+      background: linear-gradient(180deg, rgba(44, 47, 54, 0.92) 0%, rgba(27, 29, 34, 0.96) 100%);
+      border-bottom: 1px solid rgba(0, 0, 0, 0.75);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
       user-select: none;
     }
 
     .traffic-lights {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
+      gap: 7px;
     }
 
     .tl {
       position: relative;
-      width: 10px;
-      height: 10px;
+      width: 11px;
+      height: 11px;
       border-radius: 50%;
       display: block;
       padding: 0;
       box-shadow:
-        inset 0 0 0 0.5px rgba(0, 0, 0, 0.42),
-        0 0.5px 0 rgba(255, 255, 255, 0.12);
+        inset 0 0 0 0.5px rgba(0, 0, 0, 0.48),
+        0 0.5px 0 rgba(255, 255, 255, 0.15);
+      transition: transform 0.16s ease, filter 0.16s ease;
     }
 
-    .tl-close { background: radial-gradient(circle at 35% 35%, #ff736a, #ff5f57 65%, #e0443e); }
-    .tl-min   { background: radial-gradient(circle at 35% 35%, #ffd04b, #febc2e 65%, #d89e24); }
-    .tl-zoom  { background: radial-gradient(circle at 35% 35%, #46db5c, #28c840 65%, #1ea632); }
+    .traffic-lights:hover .tl {
+      filter: brightness(1.1);
+    }
+
+    .tl-close { background: radial-gradient(circle at 35% 35%, #ff8278, #ff5f57 65%, #d63832); }
+    .tl-min   { background: radial-gradient(circle at 35% 35%, #ffd85e, #febc2e 65%, #cf9019); }
+    .tl-zoom  { background: radial-gradient(circle at 35% 35%, #52e668, #28c840 65%, #199b2d); }
 
     .window-title {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 5px;
+      gap: 6px;
       font-family: var(--ui-font) !important;
-      font-size: 11px;
+      font-size: 11.5px;
       font-weight: 600;
       letter-spacing: -0.01em;
-      color: #dedee3;
-      text-shadow: 0 1px 0 rgba(0, 0, 0, 0.65);
+      color: #eceef2;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -165,72 +210,87 @@
       font-family: var(--ui-font) !important;
     }
 
-    /* Native macOS Terminal Proxy Folder/Terminal Glyph */
     .folder-glyph {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      padding: 0 3px;
-      height: 13px;
-      border-radius: 2px;
-      background: #141416;
-      border: 1px solid #525258;
-      color: #f2f2f7;
+      padding: 0 5px;
+      height: 16px;
+      border-radius: 4px;
+      background: linear-gradient(180deg, #161920 0%, #0b0d11 100%);
+      border: 1px solid rgba(50, 215, 75, 0.35);
+      color: var(--green-bright);
       font-family: var(--term-font) !important;
       font-size: 8.5px;
-      font-weight: 700;
+      font-weight: 800;
       line-height: 1;
-      box-shadow: 0 1px 1px rgba(0, 0, 0, 0.45);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.08);
     }
 
     .tty-dims {
       justify-self: end;
       font-family: var(--term-font) !important;
-      font-size: 9.5px;
-      color: #8e8e93;
-      letter-spacing: 0.02em;
+      font-size: 9px;
+      font-weight: 700;
+      color: #9da3ae;
+      background: rgba(0, 0, 0, 0.34);
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      padding: 1.5px 6px;
+      border-radius: 4px;
+      letter-spacing: 0.04em;
     }
 
-    /* Pitch-Black Terminal.app "Pro" Profile Viewport */
+    /* Main Console Viewport */
     .terminal-body {
       position: relative;
-      background: var(--term-black);
-      padding: 9px 11px 10px;
+      background: transparent;
+      padding: 12px 14px 13px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
     }
 
-    /* Subtle Terminal Scrollbar Track on Right Edge */
-    .terminal-body::after {
-      content: "";
-      position: absolute;
-      top: 5px;
-      right: 2px;
-      width: 3px;
-      height: 36px;
-      border-radius: 2px;
-      background: rgba(255, 255, 255, 0.14);
-      pointer-events: none;
-    }
-
-    /* Login Banner / Shell Prompt Header */
+    /* Hero Header & Active Tab Probe */
     .term-header {
-      padding-bottom: 7px;
-      margin-bottom: 7px;
-      border-bottom: 1px dashed var(--border-bright);
+      padding: 10px 12px;
+      background:
+        radial-gradient(90% 120% at 100% 0%, rgba(100, 210, 255, 0.07) 0%, transparent 60%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.038) 0%, rgba(255, 255, 255, 0.012) 100%);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-card);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      position: relative;
     }
 
     .login-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
       font-size: 9.5px;
       color: var(--dim);
-      margin-bottom: 3px;
-      letter-spacing: 0.01em;
+      margin-bottom: 6px;
+      letter-spacing: 0.02em;
+    }
+
+    .login-banner::after {
+      content: "● IPC SOCKET LIVE";
+      color: var(--green-bright);
+      font-size: 8.5px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      padding: 1.5px 6px;
+      border-radius: 999px;
+      background: rgba(50, 215, 75, 0.1);
+      border: 1px solid rgba(50, 215, 75, 0.28);
+      box-shadow: 0 0 10px rgba(50, 215, 75, 0.15);
     }
 
     .header-meta {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 6px;
-      margin-bottom: 3px;
+      gap: 8px;
+      margin-bottom: 5px;
     }
 
     .eyebrow {
@@ -250,32 +310,76 @@
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-width: 22px;
-      padding: 0 5px;
-      border-radius: 3px;
+      min-width: 28px;
+      padding: 2px 7px;
+      border-radius: 5px;
       border: 1px solid var(--green-border);
-      background: var(--green-soft);
-      color: var(--green) !important;
+      background: linear-gradient(180deg, rgba(50, 215, 75, 0.18) 0%, rgba(50, 215, 75, 0.08) 100%);
+      color: var(--green-bright) !important;
       font-size: 10px;
       font-weight: 700;
       line-height: 1.3;
       font-variant-numeric: tabular-nums;
+      box-shadow: 0 0 14px rgba(50, 215, 75, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.15);
     }
 
     #count.badge::before {
-      content: "PID:";
-      font-weight: 500;
-      opacity: 0.78;
-      margin-right: 3px;
+      content: "STREAMS:";
+      font-weight: 600;
+      font-size: 8px;
+      letter-spacing: 0.05em;
+      opacity: 0.85;
+      margin-right: 4px;
+    }
+
+    .title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 5px;
     }
 
     h1 {
-      font-size: 13.5px !important;
+      font-family: var(--ui-font) !important;
+      font-size: 16px !important;
       font-weight: 700 !important;
-      margin: 0 0 2px !important;
-      color: var(--text) !important;
-      letter-spacing: -0.01em;
-      line-height: 1.25;
+      margin: 0 !important;
+      background: linear-gradient(180deg, #ffffff 15%, #cfd5e0 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: -0.025em;
+      line-height: 1.2;
+    }
+
+    /* Live Mini Audio/Video Signal Equalizer */
+    .signal-bars {
+      display: inline-flex;
+      align-items: flex-end;
+      gap: 2.5px;
+      height: 13px;
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.35);
+      border: 1px solid var(--border);
+    }
+
+    .signal-bars i {
+      display: block;
+      width: 2px;
+      border-radius: 1px;
+      background: var(--green);
+      animation: eqPulse 1.2s ease-in-out infinite alternate;
+    }
+
+    .signal-bars i:nth-child(1) { height: 4px; animation-delay: 0.0s; }
+    .signal-bars i:nth-child(2) { height: 9px; animation-delay: 0.2s; background: var(--green-bright); }
+    .signal-bars i:nth-child(3) { height: 6px; animation-delay: 0.4s; background: var(--cyan); }
+    .signal-bars i:nth-child(4) { height: 8px; animation-delay: 0.15s; }
+
+    @keyframes eqPulse {
+      0% { transform: scaleY(0.45); opacity: 0.65; }
+      100% { transform: scaleY(1); opacity: 1; }
     }
 
     .muted {
@@ -289,21 +393,28 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      font-size: 10.5px;
+      padding: 4px 8px;
+      background: rgba(100, 210, 255, 0.06);
+      border: 1px solid rgba(100, 210, 255, 0.16);
+      border-radius: 5px;
     }
 
     #pageTitle.muted::before {
-      content: "cwd: ";
+      content: "cwd ▸ ";
       color: var(--dim);
+      font-weight: 600;
     }
 
-    /* Detected Media Cards (Terminal Section Blocks) */
+    /* Media Stream & Subtitle Cards */
     .card {
-      margin-top: 6px !important;
-      padding: 6px 8px !important;
-      background: var(--term-black) !important;
+      margin: 0 !important;
+      padding: 9px 10px !important;
+      background: var(--term-surface) !important;
       border: 1px solid var(--border) !important;
-      border-radius: 4px !important;
-      transition: border-color 0.14s ease, background-color 0.14s ease;
+      border-radius: var(--radius-card) !important;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 4px 16px rgba(0, 0, 0, 0.25);
+      transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
     }
 
     .card:hover {
@@ -314,45 +425,58 @@
     .card strong {
       display: flex;
       align-items: center;
-      gap: 5px;
+      justify-content: space-between;
+      gap: 6px;
+      font-family: var(--ui-font) !important;
       font-size: 10.5px;
       font-weight: 700;
-      color: var(--green);
-      margin-bottom: 4px;
+      letter-spacing: 0.04em;
+      color: var(--text-secondary);
+      margin-bottom: 7px;
       line-height: 1.3;
-      text-transform: lowercase;
+      text-transform: uppercase;
     }
 
-    .card strong::before {
-      content: "[stream]";
-      color: var(--dim);
-      font-weight: 500;
+    .card strong::after {
+      content: "HLS · DASH · MP4";
+      font-family: var(--term-font) !important;
+      font-size: 8.5px;
+      font-weight: 700;
+      color: var(--green-bright);
+      background: var(--green-soft);
+      border: 1px solid rgba(50, 215, 75, 0.28);
+      padding: 1.5px 6px;
+      border-radius: 4px;
+      letter-spacing: 0.05em;
     }
 
-    .card + .card strong::before {
-      content: "[subrip]";
+    .card + .card strong::after {
+      content: "VTT · SRT · ASS";
+      color: var(--cyan);
+      background: var(--cyan-soft);
+      border-color: var(--cyan-border);
     }
 
-    /* Stream & Subtitle Track Lists */
+    /* Scrollable Stream & Subtitle Lists */
     #videos.list,
     #subs.list {
       display: flex;
       flex-direction: column;
-      gap: 3px;
+      gap: 5px;
       font-size: 11px;
       line-height: 1.35;
       color: var(--text) !important;
-      max-height: 92px;
+      max-height: 114px;
       overflow-y: auto;
       overflow-x: hidden;
-      padding-right: 3px;
+      padding-right: 2px;
       scrollbar-width: thin;
-      scrollbar-color: var(--border-bright) transparent;
+      scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
     }
 
     #videos.list::-webkit-scrollbar,
     #subs.list::-webkit-scrollbar {
-      width: 5px;
+      width: 4px;
       height: 0;
     }
 
@@ -363,16 +487,32 @@
 
     #videos.list::-webkit-scrollbar-thumb,
     #subs.list::-webkit-scrollbar-thumb {
-      background: var(--border-bright);
-      border-radius: 3px;
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 4px;
     }
 
     #videos.list.muted,
     #subs.list.muted {
       color: var(--muted) !important;
+      padding: 8px 10px;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px dashed rgba(255, 255, 255, 0.11);
+      border-radius: var(--radius-item);
+      font-size: 10.5px;
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      gap: 7px;
     }
 
-    /* Stream & Subtitle Option Rows */
+    #videos.list.muted::before,
+    #subs.list.muted::before {
+      content: "◌";
+      color: var(--dim);
+      font-size: 12px;
+    }
+
+    /* Interactive Stream & Subtitle Option Rows */
     #videos.list > label,
     #subs.list > label,
     #videos.list > div,
@@ -381,31 +521,31 @@
       display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: 4px 6px;
+      gap: 5px 7px;
       min-width: 0;
       margin: 0 !important;
-      padding: 5px 6px 5px 16px !important;
-      background: var(--term-black) !important;
-      border: 1px dashed var(--border) !important;
-      border-radius: 3px;
+      padding: 6.5px 8px 6.5px 19px !important;
+      background: var(--term-input) !important;
+      border: 1px solid var(--border) !important;
+      border-radius: var(--radius-item);
       cursor: pointer;
-      transition: border-color 0.14s ease, background-color 0.14s ease, color 0.14s ease;
+      transition: all 0.16s cubic-bezier(0.2, 0.8, 0.2, 1);
     }
 
     #videos.list > label::before,
     #subs.list > label::before,
     #videos.list > div::before,
     #subs.list > div::before {
-      content: "❯";
+      content: "›";
       position: absolute;
-      left: 5px;
-      top: 6px;
-      transform: none;
-      font-size: 10px;
+      left: 7px;
+      top: 5.5px;
+      font-size: 12.5px;
       font-weight: 700;
       color: var(--green);
       opacity: 0;
-      transition: opacity 0.12s ease;
+      transform: translateX(-2px);
+      transition: opacity 0.15s ease, transform 0.15s ease;
     }
 
     #videos.list > label:hover,
@@ -420,17 +560,17 @@
     #subs.list > label:hover::before,
     #videos.list > div:hover::before,
     #subs.list > div:hover::before {
-      opacity: 0.45;
+      opacity: 0.65;
+      transform: translateX(0);
     }
 
     #videos.list > label:has(input:checked),
     #subs.list > label:has(input:checked),
     #videos.list > div:has(input:checked),
     #subs.list > div:has(input:checked) {
-      border-style: solid !important;
       border-color: var(--green-border) !important;
-      border-left: 2px solid var(--green) !important;
-      background: rgba(48, 209, 88, 0.09) !important;
+      background: linear-gradient(90deg, rgba(50, 215, 75, 0.14) 0%, rgba(50, 215, 75, 0.04) 100%) !important;
+      box-shadow: inset 2.5px 0 0 var(--green-bright), 0 3px 10px rgba(0, 0, 0, 0.4);
       color: #ffffff !important;
     }
 
@@ -439,6 +579,7 @@
     #videos.list > div:has(input:checked)::before,
     #subs.list > div:has(input:checked)::before {
       opacity: 1;
+      transform: translateX(0);
     }
 
     /* Stream URL / Label Text */
@@ -453,49 +594,43 @@
       white-space: nowrap;
     }
 
-    /* Terminal-Style Bracket Radio Buttons ([ ] / [*]) */
+    /* Custom Precision Radio Indicator */
     input[type="radio"] {
       appearance: none;
       -webkit-appearance: none;
       position: relative;
-      width: auto !important;
-      height: auto !important;
+      width: 13.5px !important;
+      height: 13.5px !important;
       margin: 0 !important;
       padding: 0 !important;
       flex-shrink: 0;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      background: transparent !important;
-      border: none !important;
-      border-radius: 0 !important;
-      font-size: 11px !important;
-      font-weight: 700 !important;
-      line-height: 1 !important;
-      color: var(--dim) !important;
+      background: rgba(255, 255, 255, 0.04) !important;
+      border: 1.5px solid var(--dim) !important;
+      border-radius: 50% !important;
       cursor: pointer;
-      transition: color 0.14s ease;
-    }
-
-    input[type="radio"]::before {
-      content: "[ ]";
+      transition: all 0.16s ease;
     }
 
     input[type="radio"]:hover {
-      color: var(--muted) !important;
+      border-color: var(--muted) !important;
     }
 
     input[type="radio"]:checked {
-      color: var(--green) !important;
-      background: transparent !important;
-    }
-
-    input[type="radio"]:checked::before {
-      content: "[*]";
+      border-color: var(--green-bright) !important;
+      background: rgba(50, 215, 75, 0.22) !important;
+      box-shadow: 0 0 10px rgba(50, 215, 75, 0.4);
     }
 
     input[type="radio"]:checked::after {
-      content: none !important;
+      content: "";
+      width: 5.5px;
+      height: 5.5px;
+      border-radius: 50%;
+      background: var(--green-bright);
+      display: block;
     }
 
     /* Stream Format / Tag Flags */
@@ -510,247 +645,16 @@
       overflow: hidden;
       text-overflow: ellipsis;
       margin-left: 0;
-      padding: 1px 5px;
-      border-radius: 2px;
-      border: 1px solid rgba(100, 210, 255, 0.24);
-      background: rgba(100, 210, 255, 0.07);
+      padding: 1.5px 6px;
+      border-radius: 4px;
+      border: 1px solid var(--cyan-border);
+      background: var(--cyan-soft);
       color: var(--cyan) !important;
       font-size: 9px;
-      font-weight: 600;
-      letter-spacing: 0.03em;
+      font-weight: 700;
+      letter-spacing: 0.04em;
       text-transform: uppercase;
-      line-height: 1.3;
-    }
-
-    /* Error Box (stderr style) */
-    #errorBox.error {
-      margin-top: 6px;
-      padding: 6px 8px;
-      background: var(--red-soft) !important;
-      border: 1px solid var(--red-border) !important;
-      border-left: 3px solid var(--red) !important;
-      border-radius: 4px;
-      color: #ffd2cf !important;
-      font-size: 11px;
-    }
-
-    #errorBox[hidden] {
-      display: none !important;
-    }
-
-    #errorText::before {
-      content: "stderr: ";
-      color: var(--red);
-      font-weight: 700;
-    }
-
-    #errorText {
-      word-break: break-word;
-    }
-
-    /* Auto-Intercept Toggle Rows (CLI Flag Style) */
-    .intercept-row {
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      margin: 6px 0 0 !important;
-      padding: 5px 8px;
-      background: var(--term-black) !important;
-      border: 1px solid var(--border) !important;
-      border-radius: 4px;
-      font-size: 11px;
-      font-weight: 500;
-      line-height: 1.25;
-      color: var(--text);
-      cursor: pointer;
-      user-select: none;
-      transition: border-color 0.14s ease, background-color 0.14s ease;
-    }
-
-    .intercept-row:hover {
-      border-color: var(--border-bright) !important;
-      background: var(--term-hover) !important;
-    }
-
-    .intercept-row:focus-within {
-      border-color: var(--green-border) !important;
-      background: #030704 !important;
-    }
-
-    /* Terminal-Style Bracket Checkboxes ([ ] / [✓]) */
-    input[type="checkbox"] {
-      appearance: none;
-      -webkit-appearance: none;
-      position: relative;
-      width: auto !important;
-      height: auto !important;
-      margin: 0 !important;
-      padding: 0 !important;
-      flex-shrink: 0;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      background: transparent !important;
-      border: none !important;
-      border-radius: 0 !important;
-      font-size: 11.5px !important;
-      font-weight: 700 !important;
-      line-height: 1 !important;
-      color: var(--dim) !important;
-      cursor: pointer;
-      transition: color 0.14s ease;
-    }
-
-    input[type="checkbox"]::before {
-      content: "[ ]";
-    }
-
-    input[type="checkbox"]:hover {
-      color: var(--muted) !important;
-    }
-
-    input[type="checkbox"]:focus-visible {
-      outline: 1px dashed var(--green) !important;
-      outline-offset: 2px;
-    }
-
-    input[type="checkbox"]:checked {
-      color: var(--green) !important;
-      background: transparent !important;
-    }
-
-    input[type="checkbox"]:checked::before {
-      content: "[x]";
-    }
-
-    input[type="checkbox"]:checked::after {
-      content: none !important;
-    }
-
-    /* Action Button Rows */
-    .row {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 5px;
-    }
-
-    .primary-actions {
-      margin-top: 7px !important;
-      padding-top: 7px;
-      border-top: 1px dashed var(--border-bright);
-    }
-
-    .primary-actions button {
-      flex: 1 1 auto;
-      text-align: center;
-      white-space: nowrap;
-      padding: 5px 7px !important;
-    }
-
-    .primary-actions button.primary {
-      flex: 1.55 1 auto;
-    }
-
-    button {
-      appearance: none;
-      -webkit-appearance: none;
-      padding: 5px 8px !important;
-      border-radius: 4px !important;
-      border: 1px solid var(--border-bright) !important;
-      background: var(--term-elevated) !important;
-      color: var(--text) !important;
-      font-size: 11px !important;
-      font-weight: 600 !important;
-      line-height: 1.2;
-      cursor: pointer;
-      transition: background-color 0.14s ease, border-color 0.14s ease, color 0.14s ease, transform 0.08s ease;
-    }
-
-    button:hover {
-      background: #18181d !important;
-      border-color: #5a5a64 !important;
-    }
-
-    button:active {
-      transform: translateY(1px);
-    }
-
-    button:focus-visible {
-      outline: 1px dashed var(--green) !important;
-      outline-offset: 2px;
-    }
-
-    button.primary {
-      background: var(--green-soft) !important;
-      border-color: var(--green-border) !important;
-      color: var(--green) !important;
-    }
-
-    button.primary::before {
-      content: "$ ";
-      opacity: 0.78;
-    }
-
-    button.primary:hover {
-      background: rgba(48, 209, 88, 0.22) !important;
-      border-color: var(--green) !important;
-    }
-
-    .link-footer {
-      margin-top: 7px !important;
-      padding-top: 7px;
-      border-top: 1px dashed var(--border-bright);
-      justify-content: space-between;
-    }
-
-    #linkStatus.muted {
-      font-size: 10.5px;
-      color: var(--cyan) !important;
-      word-break: break-word;
-      text-align: right;
-    }
-
-    /* Bottom Terminal Prompt (zsh / bash status line) */
-    .shell-footer {
-      margin-top: 7px;
-      padding-top: 6px;
-      border-top: 1px solid var(--border);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      font-size: 10px;
-      color: var(--dim);
-    }
-
-    .status-prompt {
-      color: var(--green);
-      font-weight: 700;
-      user-select: none;
-    }
-
-    /* Classic macOS Terminal Rectangular Block Cursor */
-    .cursor-block {
-      display: inline-block;
-      width: 6px;
-      height: 11px;
-      background: #d1d1d6;
-      vertical-align: -1.5px;
-      margin-left: 4px;
-      animation: blinkCursor 1.1s steps(1, end) infinite;
-    }
-
-    @keyframes blinkCursor {
-      0%, 49% { opacity: 1; }
-      50%, 100% { opacity: 0; }
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      main.terminal-window,
-      .cursor-block {
-        animation: none !important;
-      }
+      line-height: 1.35;
     }
 
     /* Stream rows: url text, quality badges, copy-url icon */
@@ -770,7 +674,7 @@
       background: none !important;
       color: var(--text) !important;
       font-size: 11px !important;
-      font-weight: 400 !important;
+      font-weight: 500 !important;
       letter-spacing: normal !important;
       text-transform: none !important;
       white-space: nowrap !important;
@@ -785,9 +689,9 @@
       display: inline-flex;
       flex-wrap: nowrap;
       align-items: center;
-      gap: 3px;
+      gap: 4px;
       max-width: calc(100% - 46px);
-      margin: 0 0 0 18px !important;
+      margin: 0 0 0 20px !important;
       padding: 0 !important;
       border: none !important;
       border-radius: 0 !important;
@@ -803,10 +707,10 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      padding: 1px 5px;
-      border-radius: 2px;
-      border: 1px solid rgba(100, 210, 255, 0.24);
-      background: rgba(100, 210, 255, 0.07);
+      padding: 1.5px 6px;
+      border-radius: 4px;
+      border: 1px solid var(--cyan-border);
+      background: var(--cyan-soft);
       color: var(--cyan);
       font-size: 9px;
       font-weight: 700;
@@ -816,20 +720,20 @@
     }
 
     .quality-tag.audio-video {
-      border-color: rgba(48, 209, 88, 0.5);
-      background: rgba(48, 209, 88, 0.14);
-      color: var(--green);
+      border-color: var(--green-border);
+      background: var(--green-soft);
+      color: var(--green-bright);
     }
 
     .quality-tag.video-only {
-      border-color: rgba(255, 214, 10, 0.5);
-      background: rgba(255, 214, 10, 0.14);
+      border-color: var(--amber-border);
+      background: var(--amber-soft);
       color: var(--amber);
     }
 
     #videos.list .stream-row.primary .stream-text,
     #subs.list .stream-row.primary .stream-text {
-      color: var(--green) !important;
+      color: var(--green-bright) !important;
       font-weight: 600 !important;
     }
 
@@ -838,71 +742,86 @@
       display: inline-flex !important;
       align-items: center;
       justify-content: center;
-      width: 20px !important;
-      height: 20px !important;
-      min-width: 20px;
+      width: 22px !important;
+      height: 22px !important;
+      min-width: 22px;
       margin: 0 0 0 auto !important;
       padding: 0 !important;
-      border: 1px solid transparent !important;
-      border-radius: 3px !important;
-      background: transparent !important;
+      border: 1px solid rgba(255, 255, 255, 0.06) !important;
+      border-radius: 5px !important;
+      background: rgba(255, 255, 255, 0.03) !important;
       color: var(--muted) !important;
       cursor: pointer;
+      transition: all 0.15s ease;
     }
 
     .copy-url:hover {
-      color: var(--green) !important;
+      color: var(--green-bright) !important;
       border-color: var(--green-border) !important;
-      background: rgba(48, 209, 88, 0.08) !important;
+      background: rgba(50, 215, 75, 0.14) !important;
     }
 
     .copy-url.copied {
-      color: var(--green) !important;
+      color: var(--green-bright) !important;
       border-color: var(--green-border) !important;
+      background: rgba(50, 215, 75, 0.18) !important;
     }
 
-    .dot {
-      display: inline-block;
-      width: 7px;
-      height: 7px;
-      margin-right: 6px;
-      border-radius: 50%;
-      background: var(--dim);
-      vertical-align: middle;
+    /* Error Diagnostics Box (stderr) */
+    #errorBox.error {
+      margin: 0;
+      padding: 9px 11px;
+      background: var(--red-soft) !important;
+      border: 1px solid var(--red-border) !important;
+      border-left: 3px solid var(--red) !important;
+      border-radius: var(--radius-card);
+      color: #ffd9d6 !important;
+      font-size: 11px;
     }
 
-    .dot.connected {
-      background: var(--green);
-      box-shadow: 0 0 8px var(--green);
-    }
-
-    .dot.offline {
-      background: var(--red);
-    }
-
-    .small {
-      font-size: 10.5px;
-    }
-
-    #linkExtension[hidden] {
+    #errorBox[hidden] {
       display: none !important;
     }
 
-    #copyCmd {
-      font-size: 11px !important;
+    #errorText::before {
+      content: "stderr ▸ ";
+      color: var(--red);
+      font-weight: 700;
     }
 
-    /* Launch Progress Indicator */
+    #errorText {
+      word-break: break-word;
+      line-height: 1.4;
+    }
+
+    #copyCmd {
+      font-size: 10.5px !important;
+      background: rgba(255, 69, 58, 0.18) !important;
+      border-color: rgba(255, 69, 58, 0.45) !important;
+      color: #ffd9d6 !important;
+    }
+
+    #copyCmd:hover {
+      background: rgba(255, 69, 58, 0.28) !important;
+      border-color: var(--red) !important;
+    }
+
+    /* Launch Progress Pipeline */
     .launch-progress {
       display: flex;
       flex-direction: column;
-      gap: 4px;
-      margin: 6px 0 0 !important;
-      padding: 7px;
-      background: var(--term-black) !important;
+      gap: 5px;
+      margin: 0 !important;
+      padding: 8px;
+      background: var(--term-surface) !important;
       border: 1px solid var(--green-border) !important;
-      border-radius: 4px;
-      animation: slideIn 0.12s ease-out;
+      border-radius: var(--radius-card);
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+      animation: slideIn 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+
+    .launch-progress[hidden] {
+      display: none !important;
     }
 
     @keyframes slideIn {
@@ -913,27 +832,27 @@
     .progress-step {
       display: flex;
       align-items: center;
-      gap: 7px;
-      padding: 4px 6px;
-      border-radius: 3px;
+      gap: 8px;
+      padding: 5px 8px;
+      border-radius: var(--radius-item);
       background: var(--term-input) !important;
       border: 1px solid var(--border) !important;
-      transition: all 0.25s ease;
+      transition: all 0.22s ease;
     }
 
     .progress-step .step-icon {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 16px;
-      height: 16px;
-      border-radius: 3px;
-      background: var(--border-bright) !important;
+      width: 17px;
+      height: 17px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.08) !important;
       color: var(--dim) !important;
       font-size: 9.5px;
       font-weight: 700;
       flex-shrink: 0;
-      transition: all 0.25s ease;
+      transition: all 0.22s ease;
     }
 
     .progress-step .step-label {
@@ -941,46 +860,362 @@
       font-size: 11px;
       font-weight: 500;
       color: var(--muted) !important;
-      transition: color 0.25s ease;
+      transition: color 0.22s ease;
     }
 
     .progress-step.active {
       border-color: rgba(255, 255, 255, 0.35) !important;
-      background: rgba(255, 255, 255, 0.06) !important;
+      background: rgba(255, 255, 255, 0.07) !important;
     }
 
     .progress-step.active .step-icon {
       background: #ffffff !important;
       color: #000000 !important;
-      box-shadow: 0 0 10px rgba(255, 255, 255, 0.45);
+      box-shadow: 0 0 12px rgba(255, 255, 255, 0.55);
     }
 
     .progress-step.active .step-label {
       color: #ffffff !important;
+      font-weight: 600;
     }
 
     .progress-step.done {
       border-color: var(--green-border) !important;
-      background: rgba(48, 209, 88, 0.08) !important;
+      background: rgba(50, 215, 75, 0.1) !important;
     }
 
     .progress-step.done .step-icon {
-      background: var(--green) !important;
+      background: var(--green-bright) !important;
       color: #000000 !important;
-      box-shadow: 0 0 8px rgba(48, 209, 88, 0.4);
+      box-shadow: 0 0 10px rgba(50, 215, 75, 0.5);
     }
 
     .progress-step.done .step-label {
-      color: var(--green) !important;
+      color: var(--green-bright) !important;
+    }
+
+    /* Toggle Settings Group */
+    .toggles-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .intercept-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin: 0 !important;
+      padding: 7.5px 10px;
+      background: var(--term-surface) !important;
+      border: 1px solid var(--border) !important;
+      border-radius: var(--radius-item);
+      font-family: var(--ui-font) !important;
+      font-size: 11.5px;
+      font-weight: 500;
+      line-height: 1.3;
+      color: var(--text-secondary);
+      cursor: pointer;
+      user-select: none;
+      transition: all 0.16s ease;
+    }
+
+    .intercept-row span {
+      font-family: var(--ui-font) !important;
+    }
+
+    .intercept-row:hover {
+      border-color: var(--border-bright) !important;
+      background: var(--term-elevated) !important;
+      color: var(--text);
+    }
+
+    .intercept-row:has(input:checked) {
+      border-color: rgba(50, 215, 75, 0.3) !important;
+      background: linear-gradient(90deg, rgba(50, 215, 75, 0.07) 0%, var(--term-surface) 100%) !important;
+      color: var(--text);
+    }
+
+    /* Modern macOS Pill Switch */
+    input[type="checkbox"] {
+      appearance: none;
+      -webkit-appearance: none;
+      order: 2;
+      position: relative;
+      width: 32px !important;
+      height: 18px !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      flex-shrink: 0;
+      background: rgba(255, 255, 255, 0.14) !important;
+      border: 1px solid rgba(255, 255, 255, 0.14) !important;
+      border-radius: 999px !important;
+      cursor: pointer;
+      transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    input[type="checkbox"]::before {
+      content: "";
+      position: absolute;
+      top: 1.5px;
+      left: 1.5px;
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: #f0f2f5;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+      transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1), background-color 0.2s ease;
+    }
+
+    input[type="checkbox"]:hover {
+      background: rgba(255, 255, 255, 0.22) !important;
+    }
+
+    input[type="checkbox"]:focus-visible {
+      outline: 2px solid var(--green) !important;
+      outline-offset: 2px;
+    }
+
+    input[type="checkbox"]:checked {
+      background: linear-gradient(180deg, #3ee357 0%, #2ac742 100%) !important;
+      border-color: var(--green-bright) !important;
+      box-shadow: 0 0 12px rgba(50, 215, 75, 0.35);
+    }
+
+    input[type="checkbox"]:checked::before {
+      transform: translateX(14px);
+      background: #031206;
+    }
+
+    /* Action Buttons & Layout */
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .primary-actions {
+      margin-top: 2px !important;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 7px;
+    }
+
+    .primary-actions button.primary {
+      grid-column: 1 / -1;
+      position: relative;
+      overflow: hidden;
+      padding: 9px 14px !important;
+      font-family: var(--ui-font) !important;
+      font-size: 12.5px !important;
+      font-weight: 700 !important;
+      letter-spacing: -0.01em;
+    }
+
+    .primary-actions button {
+      text-align: center;
+      white-space: nowrap;
+      padding: 6.5px 10px !important;
+    }
+
+    button {
+      appearance: none;
+      -webkit-appearance: none;
+      padding: 6.5px 11px !important;
+      border-radius: var(--radius-btn) !important;
+      border: 1px solid var(--border-bright) !important;
+      background: linear-gradient(180deg, rgba(28, 33, 44, 0.92) 0%, rgba(19, 22, 30, 0.96) 100%) !important;
+      color: var(--text) !important;
+      font-family: var(--ui-font) !important;
+      font-size: 11.5px !important;
+      font-weight: 600 !important;
+      line-height: 1.25;
+      cursor: pointer;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 6px rgba(0, 0, 0, 0.35);
+      transition: all 0.16s cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+
+    button:hover {
+      background: linear-gradient(180deg, rgba(36, 42, 55, 0.96) 0%, rgba(25, 29, 39, 0.98) 100%) !important;
+      border-color: rgba(255, 255, 255, 0.3) !important;
+      transform: translateY(-0.5px);
+    }
+
+    button:active {
+      transform: translateY(0.5px);
+    }
+
+    button:focus-visible {
+      outline: 2px solid var(--green) !important;
+      outline-offset: 2px;
+    }
+
+    button.primary {
+      background: linear-gradient(180deg, #43e95d 0%, #26ba3e 100%) !important;
+      border-color: #6df782 !important;
+      color: #021205 !important;
+      text-shadow: 0 1px 0 rgba(255, 255, 255, 0.3);
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.52),
+        0 6px 20px rgba(50, 215, 75, 0.38);
+    }
+
+    button.primary::before {
+      content: "▶  ";
+      font-size: 10px;
+      opacity: 0.92;
+    }
+
+    button.primary::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: -100%;
+      width: 60%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+      transform: skewX(-20deg);
+      transition: left 0.55s ease;
+    }
+
+    button.primary:hover::after {
+      left: 140%;
+    }
+
+    button.primary:hover {
+      background: linear-gradient(180deg, #52f06b 0%, #2ec746 100%) !important;
+      border-color: #8afa9b !important;
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.6),
+        0 8px 24px rgba(50, 215, 75, 0.48);
+    }
+
+    #fallback {
+      width: 100%;
+      background: rgba(255, 255, 255, 0.025) !important;
+      border: 1px dashed rgba(255, 255, 255, 0.18) !important;
+      color: var(--text-secondary) !important;
+      font-family: var(--term-font) !important;
+      font-size: 10.5px !important;
+      font-weight: 500 !important;
+      padding: 6.5px 10px !important;
+      box-shadow: none !important;
+    }
+
+    #fallback:hover {
+      background: rgba(100, 210, 255, 0.09) !important;
+      border-color: var(--cyan-border) !important;
+      color: var(--cyan) !important;
+    }
+
+    /* Native Host Connection Footer */
+    .link-footer {
+      margin-top: 1px !important;
+      padding: 7.5px 10px;
+      background: var(--term-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-item);
+      justify-content: space-between;
+    }
+
+    #linkExtension {
+      padding: 4.5px 9px !important;
+      font-size: 10.5px !important;
+      background: linear-gradient(180deg, rgba(100, 210, 255, 0.16) 0%, rgba(100, 210, 255, 0.08) 100%) !important;
+      border-color: var(--cyan-border) !important;
+      color: var(--cyan) !important;
+    }
+
+    #linkExtension:hover {
+      background: rgba(100, 210, 255, 0.22) !important;
+      border-color: var(--cyan) !important;
+    }
+
+    #linkExtension[hidden] {
+      display: none !important;
+    }
+
+    #linkStatus.muted {
+      display: inline-flex;
+      align-items: center;
+      font-size: 10.5px;
+      color: var(--text-secondary) !important;
+      word-break: break-word;
+      text-align: right;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 7.5px;
+      height: 7.5px;
+      margin-right: 6px;
+      border-radius: 50%;
+      background: var(--dim);
+      flex-shrink: 0;
+    }
+
+    .dot.connected {
+      background: var(--green-bright);
+      box-shadow: 0 0 10px var(--green);
+    }
+
+    .dot.offline {
+      background: var(--red);
+      box-shadow: 0 0 8px rgba(255, 69, 58, 0.6);
+    }
+
+    /* Bottom Terminal Status Line */
+    .shell-footer {
+      padding-top: 6px;
+      border-top: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 9.5px;
+      color: var(--dim);
+    }
+
+    .status-prompt {
+      color: var(--green);
+      font-weight: 700;
+      user-select: none;
+    }
+
+    .cursor-block {
+      display: inline-block;
+      width: 5.5px;
+      height: 10px;
+      background: var(--green-bright);
+      vertical-align: -1.5px;
+      margin-left: 4px;
+      border-radius: 1px;
+      box-shadow: 0 0 6px rgba(50, 215, 75, 0.5);
+      animation: blinkCursor 1.1s steps(1, end) infinite;
+    }
+
+    @keyframes blinkCursor {
+      0%, 49% { opacity: 1; }
+      50%, 100% { opacity: 0; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      main.terminal-window,
+      .cursor-block,
+      .signal-bars i {
+        animation: none !important;
+      }
     }
   </style>
 </head>
 <body>
-  <!-- Animated Gemini-Style Aurora & Grid Backdrop -->
+  <!-- Animated Aurora & Precision Micro-Grid Backdrop -->
   <canvas id="geminiBgCanvas" aria-hidden="true"></canvas>
 
   <main class="terminal-window">
-    <!-- macOS Terminal.app Window Chrome -->
+    <!-- macOS Sequoia Window Chrome -->
     <div class="titlebar">
       <div class="traffic-lights" aria-hidden="true">
         <span class="tl tl-close"></span>
@@ -990,27 +1225,32 @@
 
       <div class="window-title">
         <span class="folder-glyph" aria-hidden="true">&gt;_</span>
-        <span>enhanced-mpv - -zsh - 80×24</span>
+        <span>enhanced-mpv — zsh</span>
       </div>
 
-      <span class="tty-dims" aria-hidden="true">⌘1</span>
+      <span class="tty-dims" aria-hidden="true">⌘⏎</span>
     </div>
 
-    <!-- Pitch-Black Terminal.app "Pro" Profile Viewport -->
+    <!-- Main Console Viewport -->
     <div class="terminal-body">
       <header class="term-header">
-        <div class="login-banner" aria-hidden="true">Last login: ttys001 - Darwin arm64</div>
+        <div class="login-banner" aria-hidden="true">ttys001 · Darwin arm64</div>
         <div class="header-meta">
           <span class="eyebrow">active tab probe</span>
           <span id="count" class="badge">0</span>
         </div>
-        <h1>Enhanced MPV</h1>
+        <div class="title-row">
+          <h1>Enhanced MPV</h1>
+          <div class="signal-bars" aria-hidden="true" title="Stream sniffer active">
+            <i></i><i></i><i></i><i></i>
+          </div>
+        </div>
         <p class="muted" id="pageTitle">Detecting media…</p>
       </header>
 
       <div class="card">
         <strong>Video streams</strong>
-        <div id="videos" class="list muted">None yet - play the page video once.</div>
+        <div id="videos" class="list muted">None yet — play the page video once.</div>
       </div>
 
       <div class="card">
@@ -1025,7 +1265,7 @@
         </div>
       </div>
 
-      <!-- Launch Progress Indicator (hidden by default) -->
+      <!-- Launch Progress Pipeline (hidden by default) -->
       <div id="launchProgress" class="launch-progress" hidden>
         <div class="progress-step" data-step="1">
           <span class="step-icon">1</span>
@@ -1041,13 +1281,17 @@
         </div>
       </div>
 
-      <label class="intercept-row">
-        <input type="checkbox" id="autoIntercept" /> Auto-intercept video pages
-      </label>
+      <div class="toggles-group">
+        <label class="intercept-row">
+          <span>Auto-intercept video pages</span>
+          <input type="checkbox" id="autoIntercept" />
+        </label>
 
-      <label class="intercept-row">
-        <input type="checkbox" id="autoPlay" checked /> Auto-Play in MPV (pause browser video)
-      </label>
+        <label class="intercept-row">
+          <span>Auto-Play in MPV (pause browser video)</span>
+          <input type="checkbox" id="autoPlay" checked />
+        </label>
+      </div>
 
       <div class="row primary-actions">
         <button class="primary" id="play" type="button">Launch in Enhanced MPV</button>
@@ -1055,7 +1299,7 @@
         <button id="options" type="button">Settings</button>
       </div>
 
-      <div class="row" style="margin-top:8px">
+      <div class="row">
         <button id="fallback" type="button">Fallback: Open Page URL via yt-dlp</button>
       </div>
 
@@ -1068,7 +1312,7 @@
         <div>
           <span class="status-prompt">macbook-pro:~ %</span> mpv --input-ipc-server<span class="cursor-block"></span>
         </div>
-        <span>ttys001 · UTF-8</span>
+        <span>UTF-8</span>
       </div>
     </div>
   </main>
@@ -1089,7 +1333,6 @@
         let dpr = 1;
         let rafId = null;
 
-        // Resize canvas cleanly to match container/viewport and device pixel ratio
         function resizeCanvas() {
           try {
             const rect = canvas.getBoundingClientRect();
@@ -1105,35 +1348,32 @@
           }
         }
 
-        // Draw a Gemini-inspired swirling neon emerald/cyan aurora field
         function drawAurora(timeSec) {
           ctx.clearRect(0, 0, width, height);
 
-          // Base pitch-obsidian backdrop
-          ctx.fillStyle = "#07080a";
+          ctx.fillStyle = "#040507";
           ctx.fillRect(0, 0, width, height);
 
-          // Focused, fluid Gemini-style neon green and cyan light waves with noticeable drift
           const minDim = Math.min(width, height);
-          const washSpan = Math.max(minDim * 0.62, 240);
+          const washSpan = Math.max(minDim * 0.68, 260);
           const orbs = [
             {
-              x: width * (0.5 + Math.cos(timeSec * 0.78) * 0.24),
-              y: height * (0.5 + Math.sin(timeSec * 0.62) * 0.22),
+              x: width * (0.5 + Math.cos(timeSec * 0.68) * 0.25),
+              y: height * (0.5 + Math.sin(timeSec * 0.54) * 0.23),
               r: washSpan,
-              color: "rgba(48, 209, 88, 0.34)"
+              color: "rgba(50, 215, 75, 0.30)"
             },
             {
-              x: width * (0.5 + Math.cos(timeSec * 0.66 + 2.2) * 0.26),
-              y: height * (0.5 + Math.sin(timeSec * 0.84 + 1.1) * 0.25),
+              x: width * (0.5 + Math.cos(timeSec * 0.58 + 2.2) * 0.27),
+              y: height * (0.5 + Math.sin(timeSec * 0.74 + 1.1) * 0.25),
               r: washSpan * 0.95,
-              color: "rgba(100, 210, 255, 0.24)"
+              color: "rgba(100, 210, 255, 0.22)"
             },
             {
-              x: width * (0.5 + Math.sin(timeSec * 0.72 + 4.1) * 0.22),
-              y: height * (0.5 + Math.cos(timeSec * 0.69 + 2.9) * 0.24),
-              r: washSpan * 0.88,
-              color: "rgba(52, 211, 153, 0.28)"
+              x: width * (0.5 + Math.sin(timeSec * 0.64 + 4.1) * 0.22),
+              y: height * (0.5 + Math.cos(timeSec * 0.60 + 2.9) * 0.24),
+              r: washSpan * 0.85,
+              color: "rgba(52, 211, 153, 0.24)"
             }
           ];
 
@@ -1144,39 +1384,21 @@
             const orb = orbs[i];
             const grad = ctx.createRadialGradient(orb.x, orb.y, 0, orb.x, orb.y, orb.r);
             grad.addColorStop(0, orb.color);
-            grad.addColorStop(0.38, orb.color.replace(/0\.\d+\)$/, "0.14)"));
-            grad.addColorStop(0.72, orb.color.replace(/0\.\d+\)$/, "0.035)"));
-            grad.addColorStop(1, "rgba(7, 8, 10, 0)");
+            grad.addColorStop(0.42, orb.color.replace(/0\.\d+\)$/, "0.12)"));
+            grad.addColorStop(0.76, orb.color.replace(/0\.\d+\)$/, "0.025)"));
+            grad.addColorStop(1, "rgba(4, 5, 7, 0)");
 
             ctx.fillStyle = grad;
             ctx.fillRect(0, 0, width, height);
           }
 
-          // Animated diagonal light ribbon sweeping smoothly across the terminal frame
-          const sweepX = width * (0.5 + Math.sin(timeSec * 0.58) * 0.34);
-          const sweepY = height * (0.5 + Math.cos(timeSec * 0.48) * 0.3);
-          const sheenGrad = ctx.createLinearGradient(
-            sweepX - width * 0.45,
-            sweepY - height * 0.35,
-            sweepX + width * 0.45,
-            sweepY + height * 0.35
-          );
-          sheenGrad.addColorStop(0, "rgba(7, 8, 10, 0)");
-          sheenGrad.addColorStop(0.35, "rgba(48, 209, 88, 0.16)");
-          sheenGrad.addColorStop(0.65, "rgba(100, 210, 255, 0.13)");
-          sheenGrad.addColorStop(1, "rgba(7, 8, 10, 0)");
-
-          ctx.fillStyle = sheenGrad;
-          ctx.fillRect(0, 0, width, height);
-
           ctx.restore();
         }
 
-        // Draw crisp 28px terminal grid lines over the animated aurora
         function drawGrid() {
-          const step = 28;
+          const step = 24;
           ctx.save();
-          ctx.strokeStyle = "rgba(255, 255, 255, 0.036)";
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.028)";
           ctx.lineWidth = 1;
 
           ctx.beginPath();
@@ -1219,7 +1441,17 @@
           }
         });
 
-        // Clean up requestAnimationFrame when popup unloads
+        // Keyboard shortcut: Cmd/Ctrl + Enter triggers primary Launch button
+        window.addEventListener("keydown", function handleKeydown(e) {
+          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+            const playBtn = document.getElementById("play");
+            if (playBtn && !playBtn.disabled) {
+              e.preventDefault();
+              playBtn.click();
+            }
+          }
+        });
+
         window.addEventListener("pagehide", function handleHide() {
           if (rafId !== null) {
             window.cancelAnimationFrame(rafId);
@@ -1227,7 +1459,7 @@
           }
         });
       } catch (initErr) {
-        console.error("Failed to initialize Gemini aurora backdrop:", initErr);
+        console.error("Failed to initialize aurora backdrop:", initErr);
       }
     })();
   </script>

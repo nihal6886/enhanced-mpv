@@ -6,9 +6,17 @@ const { URL } = require("url");
 const crypto = require("crypto");
 const { isSafeUrl } = require("./sanitizer");
 
-const RELAY_TIMEOUT_MS = 30000;
+const RELAY_TIMEOUT_MS = 3000;
 const MAX_RELAYS = 10;
 const TOKEN_BYTES = 16;
+
+function upstreamHeaders(headers) {
+  return {
+    ...(headers || {}),
+    "Accept": "*/*",
+    "Accept-Encoding": "identity",
+  };
+}
 
 const activeRelays = new Map();
 
@@ -24,27 +32,73 @@ function generateToken() {
   return crypto.randomBytes(TOKEN_BYTES).toString("hex");
 }
 
+function parseAttributes(value) {
+  const attrs = {};
+  const re = /([A-Z0-9-]+)=("[^"]*"|[^,]*)/g;
+  let match;
+  while ((match = re.exec(String(value || "")))) {
+    attrs[match[1]] = match[2].replace(/^"|"$/g, "");
+  }
+  return attrs;
+}
+
+function variantInfo(attrs, url) {
+  const resolution = /^(\d+)x(\d+)$/.exec(attrs.RESOLUTION || "") || [];
+  const bandwidth = parseInt(attrs.BANDWIDTH || "0", 10) || 0;
+  const width = parseInt(resolution[1] || "0", 10) || 0;
+  const height = parseInt(resolution[2] || "0", 10) || 0;
+  return {
+    url,
+    bandwidth,
+    width,
+    height,
+    resolution: width && height ? `${width}x${height}` : "",
+    codecs: attrs.CODECS || "",
+    audio: attrs.AUDIO || "",
+    frameRate: Number(attrs["FRAME-RATE"] || 0) || 0,
+    label: height ? `${height}p` : bandwidth ? `${Math.round(bandwidth / 1000)}k` : "Auto",
+  };
+}
+
 function parseM3U8(content, baseUrl) {
-  const lines = content.split("\n");
+  const lines = String(content || "").replace(/\r\n?/g, "\n").split("\n");
   const segments = [];
+  const variants = [];
+  const renditions = [];
   let bandwidth = 0;
   let variantUrl = null;
   let isMaster = false;
+  let pendingAttrs = null;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
-    if (line.startsWith("#EXT-X-STREAM-INF:")) {
-      isMaster = true;
-      const bwMatch = line.match(/BANDWIDTH=(\d+)/);
-      if (bwMatch) bandwidth = parseInt(bwMatch[1], 10);
-      const nextLine = lines[i + 1]?.trim();
-      if (nextLine && !nextLine.startsWith("#")) {
+    if (line.startsWith("#EXT-X-MEDIA:")) {
+      const attrs = parseAttributes(line.slice("#EXT-X-MEDIA:".length));
+      if (attrs.URI) {
         try {
-          variantUrl = new URL(nextLine, baseUrl).toString();
+          renditions.push({ ...attrs, url: new URL(attrs.URI, baseUrl).toString() });
         } catch {
-          variantUrl = null;
+          // skip invalid rendition URL
         }
       }
+    } else if (line.startsWith("#EXT-X-STREAM-INF:")) {
+      isMaster = true;
+      pendingAttrs = parseAttributes(line.slice("#EXT-X-STREAM-INF:".length));
+      const bwMatch = line.match(/BANDWIDTH=(\d+)/);
+      if (bwMatch) bandwidth = parseInt(bwMatch[1], 10);
+    } else if (line && !line.startsWith("#") && pendingAttrs) {
+      try {
+        const url = new URL(line, baseUrl).toString();
+        const variant = variantInfo(pendingAttrs, url);
+        variants.push(variant);
+        if (!variantUrl || variant.bandwidth >= bandwidth) {
+          variantUrl = url;
+          bandwidth = variant.bandwidth || bandwidth;
+        }
+      } catch {
+        // skip invalid variant URL
+      }
+      pendingAttrs = null;
     } else if (line.startsWith("#EXTINF:")) {
       const nextLine = lines[i + 1]?.trim();
       if (nextLine && !nextLine.startsWith("#")) {
@@ -57,7 +111,9 @@ function parseM3U8(content, baseUrl) {
     }
   }
 
-  return { isMaster, bandwidth, variantUrl, segments, baseUrl };
+  variants.sort((a, b) => (b.bandwidth - a.bandwidth) || (b.height - a.height));
+
+  return { isMaster, bandwidth, variantUrl, variants, renditions, segments, baseUrl };
 }
 
 async function fetchWithHeaders(url, headers, timeoutMs = RELAY_TIMEOUT_MS) {
@@ -67,36 +123,84 @@ async function fetchWithHeaders(url, headers, timeoutMs = RELAY_TIMEOUT_MS) {
       return;
     }
     const lib = url.startsWith("https:") ? https : http;
-    const req = lib.get(url, { headers, timeout: timeoutMs, agent: relayAgent(url) }, (res) => {
+    let settled = false;
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+    const req = lib.get(url, { headers: upstreamHeaders(headers), timeout: timeoutMs, agent: relayAgent(url) }, (res) => {
+      res.setTimeout(timeoutMs, () => {
+        res.destroy();
+        fail(new Error("upstream response timeout"));
+      });
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
         let next;
         try {
           next = new URL(res.headers.location, url).toString();
         } catch {
-          reject(new Error("unsafe redirect"));
+          fail(new Error("unsafe redirect"));
           return;
         }
         if (!isSafeUrl(next)) {
-          reject(new Error("unsafe redirect"));
+          fail(new Error("unsafe redirect"));
           return;
         }
-        fetchWithHeaders(next, headers, timeoutMs).then(resolve, reject);
+        fetchWithHeaders(next, headers, timeoutMs).then(resolve, fail);
         return;
       }
       const chunks = [];
       res.on("data", (c) => chunks.push(c));
-      res.on("end", () => resolve({
-        statusCode: res.statusCode,
-        headers: res.headers,
-        body: Buffer.concat(chunks),
-      }));
+      res.on("end", () => {
+        if (settled) return;
+        settled = true;
+        resolve({
+          statusCode: res.statusCode,
+          headers: res.headers,
+          body: Buffer.concat(chunks),
+        });
+      });
+      res.on("error", fail);
     });
     req.on("timeout", () => {
       req.destroy();
-      reject(new Error("timeout"));
+      fail(new Error("timeout"));
     });
-    req.on("error", reject);
+    req.on("error", fail);
   });
+}
+
+// Resolve a possibly nested master playlist down to the highest-bandwidth media
+// variant. Without this a synthesized master can point at another master and
+// mpv may start audio while never opening a video media playlist (black screen).
+async function resolveMediaVariant(url, headers, depth = 0) {
+  if (depth > 3) return { url, parsed: null };
+  const response = await fetchWithHeaders(url, headers);
+  if (response.statusCode !== 200 && response.statusCode !== 206) {
+    throw new Error(`Manifest fetch failed: ${response.statusCode}`);
+  }
+  const parsed = parseM3U8(response.body.toString("utf8"), url);
+  if (parsed.isMaster && parsed.variantUrl) {
+    return resolveMediaVariant(parsed.variantUrl, headers, depth + 1);
+  }
+  return { url, parsed, headers: response.headers };
+}
+
+async function resolveAudioMedia(url, headers, depth = 0) {
+  if (depth > 3) return { url, parsed: null };
+  const response = await fetchWithHeaders(url, headers);
+  if (response.statusCode !== 200 && response.statusCode !== 206) {
+    throw new Error(`Manifest fetch failed: ${response.statusCode}`);
+  }
+  const parsed = parseM3U8(response.body.toString("utf8"), url);
+  if (parsed.isMaster) {
+    const rendition = parsed.renditions.find((r) => String(r.TYPE).toUpperCase() === "AUDIO" && r.URI);
+    if (rendition) return resolveAudioMedia(rendition.url, headers, depth + 1);
+    const audioVariant = parsed.variants.find((v) => /mp4a|aac|ac-3|ec-3/i.test(v.codecs)) || parsed.variants[0];
+    if (audioVariant) return resolveAudioMedia(audioVariant.url, headers, depth + 1);
+  }
+  return { url, parsed, headers: response.headers };
 }
 
 async function resolveManifest(url, headers) {
@@ -225,7 +329,8 @@ function openUpstream(url, headers, redirects = 0) {
       return;
     }
     const lib = url.startsWith("https:") ? https : http;
-    const req = lib.get(url, { headers, timeout: RELAY_TIMEOUT_MS, agent: relayAgent(url) }, (res) => {
+    const req = lib.get(url, { headers: upstreamHeaders(headers), timeout: RELAY_TIMEOUT_MS, agent: relayAgent(url) }, (res) => {
+      res.setTimeout(RELAY_TIMEOUT_MS, () => res.destroy(new Error("upstream response timeout")));
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         if (redirects >= MAX_REDIRECTS) {
@@ -411,15 +516,40 @@ function cleanupOldRelays() {
   }
 }
 
-async function startMasterRelay(videoUrl, videoHeaders, audioUrl, audioHeaders) {
+async function startMasterRelay(videoUrl, videoHeaders, audioUrl, audioHeaders, meta = {}) {
   const masterToken = generateToken();
   const videoToken = generateToken();
   const audioToken = generateToken();
 
-  const videoSub = await createSubRelay(videoUrl, videoHeaders, videoToken, "video");
+  // A proxy may expose a master playlist under a media-playlist-looking URL.
+  // Resolve it to a real video variant before relaying so mpv cannot end up
+  // with audio-only playback from a nested master.
+  let videoMediaUrl = videoUrl;
+  let videoMeta = {};
+  try {
+    const resolved = await resolveMediaVariant(videoUrl, videoHeaders);
+    if (resolved.url && resolved.url !== videoUrl) videoMediaUrl = resolved.url;
+    if (resolved.parsed && resolved.parsed.variants && resolved.parsed.variants.length) {
+      videoMeta = { ...resolved.parsed.variants[0] };
+    }
+  } catch {
+    // Fall back to the supplied URL; the sub-relay will report a clear 502 if
+    // the upstream is truly unavailable.
+    videoMeta = {};
+  }
+
+  let audioMediaUrl = audioUrl;
+  try {
+    const resolvedAudio = await resolveAudioMedia(audioUrl, audioHeaders);
+    if (resolvedAudio.url) audioMediaUrl = resolvedAudio.url;
+  } catch {
+    // Keep the original audio URL; keep-alive/streaming errors surface later.
+  }
+
+  const videoSub = await createSubRelay(videoMediaUrl, videoHeaders, videoToken, "video");
   let audioSub;
   try {
-    audioSub = await createSubRelay(audioUrl, audioHeaders, audioToken, "audio");
+    audioSub = await createSubRelay(audioMediaUrl, audioHeaders, audioToken, "audio");
   } catch (err) {
     stopRelay(videoSub.token);
     throw err;
@@ -430,9 +560,9 @@ async function startMasterRelay(videoUrl, videoHeaders, audioUrl, audioHeaders) 
   // Create master relay that serves the synthesized master manifest
   return new Promise((resolve, reject) => {
     const entry = {
-      videoUrl,
+      videoUrl: videoMediaUrl,
       videoHeaders,
-      audioUrl,
+      audioUrl: audioMediaUrl,
       audioHeaders,
       videoToken,
       audioToken,
@@ -462,11 +592,20 @@ async function startMasterRelay(videoUrl, videoHeaders, audioUrl, audioHeaders) 
 
       const resource = pathParts.slice(1).join("/");
       if (resource === "master.m3u8" || resource === "") {
+        const info = { ...meta, ...videoMeta };
+        const bandwidth = Math.max(1, Number(info.bandwidth) || 8000000);
+        const width = Number(info.width) || 0;
+        const height = Number(info.height) || 0;
+        const resolution = width && height ? `,RESOLUTION=${width}x${height}` : "";
+        const codecs = info.codecs ? `,CODECS="${String(info.codecs).replace(/"/g, "")}"` : "";
+        const frameRate = Number(info.frameRate) > 0 ? `,FRAME-RATE=${Number(info.frameRate).toFixed(3)}` : "";
+        const audioCodecs = info.audioCodecs ? `,CODECS="${String(info.audioCodecs).replace(/"/g, "")}"` : "";
         const masterManifest = [
           "#EXTM3U",
           "#EXT-X-VERSION:3",
-          `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Default",DEFAULT=YES,AUTOSELECT=YES,URI="${audioRelayUrl}"`,
-          `#EXT-X-STREAM-INF:BANDWIDTH=8000000,AUDIO="audio"`,
+          "#EXT-X-INDEPENDENT-SEGMENTS",
+          `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Default",DEFAULT=YES,AUTOSELECT=YES${audioCodecs},URI="${audioRelayUrl}"`,
+          `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth}${resolution}${codecs}${frameRate},AUDIO="audio"`,
           videoRelayUrl,
           "",
         ].join("\n");

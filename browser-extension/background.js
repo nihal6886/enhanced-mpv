@@ -54,9 +54,86 @@ const PAGE_STREAM_LABEL = "Page Stream via yt-dlp (Best Video + Audio + Captions
 
 const tabState = new Map();
 const manifestResolution = new Map();
+const preResolveInFlight = new Map();
+const liveTraffic = new Map();
+const liveBoostTimers = new Map();
 
 const MAX_STREAMS_PER_TAB = 15;
 const MANIFEST_PROBE_TIMEOUT_MS = 2500;
+const LIVE_TRAFFIC_TTL_MS = 15000;
+const LIVE_SIGNAL_SCORE = 3500;
+
+function liveTrafficKey(url) {
+  try {
+    const u = new URL(url);
+    return u.host + u.pathname.replace(/\/[^/]*$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function notifyLiveSegment(tabId, url) {
+  if (tabId == null || tabId < 0) return;
+  const key = liveTrafficKey(url);
+  if (!key) return;
+  let map = liveTraffic.get(tabId);
+  if (!map) {
+    map = new Map();
+    liveTraffic.set(tabId, map);
+  }
+  const now = Date.now();
+  map.set(key, now);
+  for (const [k, ts] of map) {
+    if (now - ts > LIVE_TRAFFIC_TTL_MS) map.delete(k);
+  }
+  if (!liveBoostTimers.has(tabId)) {
+    liveBoostTimers.set(tabId, setTimeout(() => {
+      liveBoostTimers.delete(tabId);
+      boostLiveScores(tabId);
+    }, 100));
+  }
+}
+
+function boostLiveScores(tabId) {
+  const state = tabState.get(tabId);
+  if (!state) return;
+  let changed = false;
+  for (const video of state.videos) {
+    if (!video.liveBoosted && hasLiveTraffic(tabId, video.url)) {
+      video.liveBoosted = true;
+      video.score = (video.score || 0) + LIVE_SIGNAL_SCORE;
+      changed = true;
+    }
+  }
+  if (changed) {
+    state.videos.sort((a, b) => b.score - a.score);
+    persist(tabId);
+  }
+}
+
+function hasLiveTraffic(tabId, url) {
+  if (tabId == null || tabId < 0) return false;
+  const map = liveTraffic.get(tabId);
+  if (!map || !map.size) return false;
+  const key = liveTrafficKey(url);
+  if (!key) return false;
+  const now = Date.now();
+  let pathStem = "";
+  try {
+    const u = new URL(url);
+    pathStem = u.host + u.pathname.replace(/\.m3u8?$/i, "");
+  } catch {
+    void 0;
+  }
+  for (const [liveKey, ts] of map) {
+    if (now - ts > LIVE_TRAFFIC_TTL_MS) continue;
+    if (liveKey === key) return true;
+    if (pathStem && (liveKey.startsWith(pathStem + "/") || liveKey === pathStem)) return true;
+    const originLen = liveKey.indexOf("/");
+    if (originLen > 0 && liveKey.startsWith(key + "/")) return true;
+  }
+  return false;
+}
 
 function emptyState() {
   return {
@@ -74,6 +151,18 @@ function emptyState() {
 function getState(tabId) {
   if (!tabState.has(tabId)) tabState.set(tabId, emptyState());
   return tabState.get(tabId);
+}
+
+let lastWarmRequest = 0;
+let warmInFlight = null;
+
+function scheduleWarmLaunch() {
+  const now = Date.now();
+  if (warmInFlight || now - lastWarmRequest < 60000) return;
+  lastWarmRequest = now;
+  warmInFlight = prewarmNative()
+    .catch(() => null)
+    .finally(() => { warmInFlight = null; });
 }
 
 function pageStreamItem(url) {
@@ -120,63 +209,111 @@ async function persist(tabId) {
   updateBadge(tabId);
 }
 
+function parseM3U8Attributes(value) {
+  const attrs = {};
+  const re = /([A-Z0-9-]+)=("[^"]*"|[^,]*)/g;
+  let match;
+  while ((match = re.exec(String(value || "")))) {
+    attrs[match[1]] = match[2].replace(/^"|"$/g, "");
+  }
+  return attrs;
+}
+
 function parseManifestInfo(text, baseUrl) {
-  const lines = text.split("\n");
+  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
   let isMaster = false;
   let hasAudio = false;
   let bestBandwidth = 0;
   let bestVariant = null;
   let bestVariantCodecs = "";
+  let bestWidth = 0;
+  let bestHeight = 0;
   let audioVariantUrl = null;
   let audioBandwidth = 0;
   let audioCodecs = "";
+  let pendingAttrs = null;
+  const variants = [];
+  const renditions = [];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (line.startsWith("#EXT-X-STREAM-INF:")) {
       isMaster = true;
-      const bwMatch = line.match(/BANDWIDTH=(\d+)/);
-      const bw = bwMatch ? parseInt(bwMatch[1], 10) : 0;
-      const codecMatch = line.match(/CODECS="([^"]+)"/);
-      const codecs = codecMatch ? codecMatch[1] : "";
-      const nextLine = lines[i + 1]?.trim();
-      if (nextLine && !nextLine.startsWith("#") && bw > bestBandwidth) {
-        try {
-          bestVariant = new URL(nextLine, baseUrl).toString();
-          bestBandwidth = bw;
+      pendingAttrs = parseM3U8Attributes(line.slice("#EXT-X-STREAM-INF:".length));
+    } else if (line.startsWith("#EXT-X-MEDIA:")) {
+      const attrs = parseM3U8Attributes(line.slice("#EXT-X-MEDIA:".length));
+      if (String(attrs.TYPE).toUpperCase() === "AUDIO") {
+        hasAudio = true;
+        const bw = parseInt(attrs.BANDWIDTH || "0", 10) || 0;
+        if (attrs.URI) {
+          try {
+            const url = new URL(attrs.URI, baseUrl).toString();
+            renditions.push({
+              url,
+              name: attrs.NAME || "Default",
+              language: attrs.LANGUAGE || "",
+              default: attrs.DEFAULT === "YES",
+              bandwidth: bw,
+              codecs: attrs.CODECS || "",
+            });
+            if (bw >= audioBandwidth) {
+              audioVariantUrl = url;
+              audioBandwidth = bw;
+              audioCodecs = attrs.CODECS || "";
+            }
+          } catch {
+            void 0;
+          }
+        }
+      }
+    } else if (line && !line.startsWith("#") && pendingAttrs) {
+      try {
+        const url = new URL(line, baseUrl).toString();
+        const resMatch = /^(\d+)x(\d+)$/.exec(pendingAttrs.RESOLUTION || "") || [];
+        const width = parseInt(resMatch[1] || "0", 10) || 0;
+        const height = parseInt(resMatch[2] || "0", 10) || 0;
+        const bandwidth = parseInt(pendingAttrs.BANDWIDTH || "0", 10) || 0;
+        const codecs = pendingAttrs.CODECS || "";
+        const variant = {
+          url,
+          bandwidth,
+          width,
+          height,
+          resolution: width && height ? `${width}x${height}` : "",
+          codecs,
+          audio: pendingAttrs.AUDIO || "",
+          frameRate: Number(pendingAttrs["FRAME-RATE"] || 0) || 0,
+          label: height ? `${height}p` : bandwidth ? `${Math.round(bandwidth / 1000)}k` : "Auto",
+        };
+        variants.push(variant);
+        if (bandwidth > bestBandwidth) {
+          bestVariant = url;
+          bestBandwidth = bandwidth;
           bestVariantCodecs = codecs;
-        } catch {
-          void 0;
+          bestWidth = width;
+          bestHeight = height;
         }
+      } catch {
+        void 0;
       }
-    } else if (line.startsWith("#EXT-X-MEDIA:") && line.includes("TYPE=AUDIO")) {
-      hasAudio = true;
-      const bwMatch = line.match(/BANDWIDTH=(\d+)/);
-      const bw = bwMatch ? parseInt(bwMatch[1], 10) : 0;
-      const codecMatch = line.match(/CODECS="([^"]+)"/);
-      const codecs = codecMatch ? codecMatch[1] : "";
-      const uriMatch = line.match(/URI="([^"]+)"/);
-      if (uriMatch && bw > audioBandwidth) {
-        try {
-          audioVariantUrl = new URL(uriMatch[1], baseUrl).toString();
-          audioBandwidth = bw;
-          audioCodecs = codecs;
-        } catch {
-          void 0;
-        }
-      }
+      pendingAttrs = null;
     }
   }
 
+  variants.sort((a, b) => (b.bandwidth - a.bandwidth) || (b.height - a.height));
   return {
     isMaster,
     hasAudio,
     bestBandwidth,
     bestVariant,
     bestVariantCodecs,
+    bestWidth,
+    bestHeight,
     audioVariantUrl,
     audioBandwidth,
     audioCodecs,
+    variants,
+    renditions,
   };
 }
 
@@ -223,6 +360,103 @@ function addAudioStream(tabId, url, extra) {
   pairAllVideoOnly(tabId);
   maybeHotAttachAudio(tabId);
   persist(tabId);
+  scheduleWarmLaunch();
+}
+
+function inferQualityLabel(url) {
+  const value = String(url || "");
+  if (/(2160|4k|uhd)/i.test(value)) return "2160p";
+  if (/(1440|2k|qhd)/i.test(value)) return "1440p";
+  if (/(1080|fhd)/i.test(value)) return "1080p";
+  if (/(720|hd)/i.test(value)) return "720p";
+  if (/(480|sd)/i.test(value)) return "480p";
+  return "";
+}
+
+function buildQualityTiers(video, info) {
+  if (!video) return [];
+  const headers = video.headers || {};
+  const baseUrl = video.playUrl || video.url;
+  if (!baseUrl) return [];
+  const variants = (info && info.variants) || [];
+  const audioInfo = (info && info.renditions && info.renditions.find((r) => r.url)) || null;
+  const fallbackAudio = video.kind === "hls-video-only" ? (video.audioUrl || null) : null;
+  const fallbackAudioHeaders = video.audioHeaders || headers;
+  const out = [{
+    label: "Auto (Best)",
+    url: baseUrl,
+    width: Number(info && info.bestWidth) || 0,
+    height: Number(info && info.bestHeight) || 0,
+    bandwidth: Number(info && info.bestBandwidth) || 0,
+    codecs: (info && info.bestVariantCodecs) || "",
+    headers,
+    audioUrl: audioInfo ? audioInfo.url : fallbackAudio,
+    audioHeaders: audioInfo ? { ...headers, ...(audioInfo.headers || {}) } : fallbackAudioHeaders,
+  }];
+  const seen = new Set(["auto"]);
+  for (const variant of variants) {
+    const key = `${variant.height || 0}:${variant.bandwidth || 0}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      label: variant.label || inferQualityLabel(variant.url) || "Auto",
+      url: variant.url,
+      masterUrl: baseUrl,
+      width: variant.width || 0,
+      height: variant.height || 0,
+      bandwidth: variant.bandwidth || 0,
+      codecs: variant.codecs || "",
+      audio: variant.audio || "",
+      headers,
+      audioUrl: audioInfo ? audioInfo.url : fallbackAudio,
+      audioHeaders: audioInfo ? { ...headers, ...(audioInfo.headers || {}) } : fallbackAudioHeaders,
+    });
+  }
+  if (out.length === 1) {
+    out[0].label = inferQualityLabel(baseUrl) || "Auto (Best)";
+  }
+  return out;
+}
+
+function schedulePreResolve(tabId, url, headers) {
+  if (tabId == null || tabId < 0 || !/\.m3u8(?:$|[?#])/i.test(url) || isAudioPlaylistUrl(url)) return;
+  const state = getState(tabId);
+  const entry = state.videos.find((v) => v.url.split("?")[0] === url.split("?")[0]);
+  if (entry && entry.preResolvedAt && Date.now() - entry.preResolvedAt < 60000) return;
+  const key = tabId + "|" + url;
+  if (preResolveInFlight.has(key) || manifestResolution.has(key)) return;
+  const promise = (async () => {
+    const text = await fetchManifestText(url, headers, 3000);
+    if (!text || !text.includes("#EXTM3U")) return;
+    const info = parseManifestInfo(text, url);
+    const currentState = getState(tabId);
+    const idx = currentState.videos.findIndex((v) => v.url.split("?")[0] === url.split("?")[0]);
+    if (idx < 0) return;
+    const video = currentState.videos[idx];
+    const next = {
+      ...video,
+      manifestInfo: info,
+      qualities: buildQualityTiers({ ...video, manifestInfo: info }, info),
+      preResolvedAt: Date.now(),
+    };
+    if (info.isMaster && info.hasAudio) {
+      next.kind = "hls-master";
+      next.isVerifiedMaster = true;
+      next.score = Math.max(next.score || 0, SCORE_HLS_MASTER);
+      if (!next.liveBoosted && hasLiveTraffic(tabId, url)) {
+        next.liveBoosted = true;
+        next.score += LIVE_SIGNAL_SCORE;
+      }
+    }
+    currentState.videos[idx] = next;
+    currentState.videos.sort((a, b) => b.score - a.score);
+    persist(tabId);
+  })().catch(() => {
+    void 0;
+  }).finally(() => {
+    preResolveInFlight.delete(key);
+  });
+  preResolveInFlight.set(key, promise);
 }
 
 // Query every frame's performance entries for audio playlists that loaded before
@@ -493,6 +727,26 @@ function ensureAudioRecovery(tabId, url, headers, frameId) {
  *   - zero polling loops
  */
 
+function audioGraphScore(videoUrl, audioUrl) {
+  try {
+    const v = new URL(videoUrl);
+    const a = new URL(audioUrl);
+    if (v.host !== a.host) return 0;
+    let score = 40;
+    const vParts = v.pathname.split("/").filter(Boolean);
+    const aParts = a.pathname.split("/").filter(Boolean);
+    if (vParts[0] && vParts[0] === aParts[0]) score += 80;
+    const vStem = v.pathname.replace(/\.m3u8?$/i, "").replace(/\/[^/]*$/, "");
+    const aStem = a.pathname.replace(/\.m3u8?$/i, "").replace(/\/[^/]*$/, "");
+    if (vStem && aStem && (vStem === aStem || vStem.startsWith(aStem + "/") || aStem.startsWith(vStem + "/"))) {
+      score += 120;
+    }
+    return score;
+  } catch {
+    return 0;
+  }
+}
+
 // Score a video-only .m3u8 and pair the best available audio track.
 function scoreVideoOnly(url, u, frameId, allVideos, audioStreams, baseScore) {
   let score = baseScore;
@@ -514,7 +768,11 @@ function scoreVideoOnly(url, u, frameId, allVideos, audioStreams, baseScore) {
   ];
   const audioCandidates = audioPool
     .filter(v => !(frameId && v.frameId && v.frameId !== frameId))
-    .sort((a, b) => (b.score || 0) - (a.score || 0));
+    .map((a) => ({
+      ...a,
+      pairScore: (a.score || 0) + audioGraphScore(url, a.url) + (frameId && a.frameId === frameId ? 100 : 0),
+    }))
+    .sort((a, b) => b.pairScore - a.pairScore);
 
   let audioUrl = null;
   if (audioCandidates.length > 0) {
@@ -550,17 +808,19 @@ function scoreStreamCandidate(url, headers, tabId, allVideos = [], audioStreams 
     return { score: 100, kind: "hls-audio-only", audioUrl: null, manifestInfo: null, frameId: frameId };
   }
 
+  const liveBonus = hasLiveTraffic(tabId, url) ? LIVE_SIGNAL_SCORE : 0;
+
   // Deterministic proxy video (.../m3u8_proxy/video/...): keep it the primary
   // video stream (never replace it with a short stub) and pair the sibling audio.
   if (PROXY_VIDEO_RE.test(u)) {
     const r = scoreVideoOnly(url, u, frameId, allVideos, audioStreams, SCORE_PROXY_VIDEO);
-    return { score: r.score, kind: r.kind, audioUrl: r.audioUrl, manifestInfo: null, frameId: frameId };
+    return { score: r.score + liveBonus, kind: r.kind, audioUrl: r.audioUrl, manifestInfo: null, frameId: frameId };
   }
 
   // Video-Only Sub-Playlists - need pairing
   if (/\.m3u8/i.test(u)) {
     const r = scoreVideoOnly(url, u, frameId, allVideos, audioStreams, 500);
-    return { score: r.score, kind: r.kind, audioUrl: r.audioUrl, manifestInfo: null, frameId: frameId };
+    return { score: r.score + liveBonus, kind: r.kind, audioUrl: r.audioUrl, manifestInfo: null, frameId: frameId };
   }
 
   // DASH MPD
@@ -646,6 +906,7 @@ function addVideo(tabId, url, extra) {
     }
     maybeHotAttachAudio(tabId);
     persist(tabId);
+    scheduleWarmLaunch();
     return;
   }
 
@@ -658,6 +919,7 @@ function addVideo(tabId, url, extra) {
     time: Date.now(),
     headers,
     frameId,
+    liveBoosted: hasLiveTraffic(tabId, url),
   };
   // Persist playback position reported by content.js so resume works even when
   // the popup cannot inject (e.g. context-menu launches).
@@ -667,6 +929,8 @@ function addVideo(tabId, url, extra) {
   state.videos.sort((a, b) => b.score - a.score);
 
   persist(tabId);
+  scheduleWarmLaunch();
+  schedulePreResolve(tabId, url, headers);
 
   // A video-only sub-playlist with no audio yet: recover audio from frames or a
   // parent master manifest so mpv receives both video and audio.
@@ -861,6 +1125,7 @@ chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (details.tabId < 0) return;
     const url = details.url;
+    if (CHUNK_RE.test(url) || /\.ts(?:$|[?#])/i.test(url)) notifyLiveSegment(details.tabId, url);
     if (VIDEO_RE.test(url)) addVideo(details.tabId, url, details);
     if (AUDIO_RE.test(url)) addAudioStream(details.tabId, url, details);
     if (SUB_RE.test(url)) addSub(details.tabId, url, details);
@@ -1113,6 +1378,81 @@ function pickUrl(info, tab) {
     || "";
 }
 
+function httpHeaderObject(headers) {
+  const source = headers || {};
+  const out = {};
+  if (source.referer) out.Referer = source.referer;
+  if (source.origin) out.Origin = source.origin;
+  if (source.userAgent) out["User-Agent"] = source.userAgent;
+  if (source.cookie) out.Cookie = source.cookie;
+  for (const [key, value] of Object.entries(source)) {
+    if (/^(referer|origin|useragent|cookie)$/i.test(key)) continue;
+    if (!value || typeof value !== "string") continue;
+    if (!/^[a-zA-Z0-9-]+$/.test(key)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+function bestAudioForVideo(state, video) {
+  const frameId = video && video.frameId;
+  const pool = [
+    ...(state.audioStreams || []),
+    ...(state.videos || []).filter((v) => v.kind === "hls-audio-only" || isAudioPlaylistUrl(v.url)),
+  ];
+  const ordered = pool
+    .filter((a) => !(frameId && a.frameId && a.frameId !== frameId))
+    .map((a) => ({ ...a, pairScore: (a.score || 0) + (video ? audioGraphScore(video.url, a.url) : 0) }))
+    .sort((a, b) => b.pairScore - a.pairScore);
+  return ordered[0] || null;
+}
+
+function candidateFromVideo(state, video, titleFallback) {
+  if (!video || !video.url) return null;
+  const headers = video.headers || {};
+  const info = video.manifestInfo || null;
+  const needsSeparateAudio = video.kind !== "hls-master" &&
+    (video.kind === "hls-video-only" || isVideoOnlyVideo(video));
+  const bestAudio = needsSeparateAudio && !video.audioUrl ? bestAudioForVideo(state, video) : null;
+  const audio = needsSeparateAudio ? (video.audioUrl || (bestAudio && bestAudio.url) || null) : null;
+  const audioHeaders = audio ? httpHeaderObject((bestAudio && bestAudio.headers) || headers) : null;
+  const height = Number(info && info.bestHeight) || 0;
+  const width = Number(info && info.bestWidth) || 0;
+  const bandwidth = Number(info && info.bestBandwidth) || 0;
+  const label = height
+    ? `${height}p`
+    : (inferQualityLabel(video.url) || (() => { try { return new URL(video.url).hostname; } catch { return "Source"; } })());
+  return {
+    url: video.playUrl || video.url,
+    audioUrl: audio,
+    audioHeaders: audioHeaders || {},
+    headers: httpHeaderObject(headers),
+    referer: headers.referer || "",
+    userAgent: headers.userAgent || "",
+    cookies: headers.cookie || "",
+    title: video.title || titleFallback || "",
+    label,
+    quality: label,
+    kind: video.kind || "",
+    width,
+    height,
+    bandwidth,
+    codecs: (info && info.bestVariantCodecs) || "",
+    score: video.score || 0,
+    qualities: buildQualityTiers(video, info),
+  };
+}
+
+function rankedCandidates(state, selectedVideo, titleFallback) {
+  if (!selectedVideo) return [];
+  const selectedKey = selectedVideo.url.split("?")[0];
+  const ordered = [
+    selectedVideo,
+    ...(state.videos || []).filter((v) => isDisplayVideo(v) && v.url.split("?")[0] !== selectedKey),
+  ];
+  return ordered.slice(0, 8).map((v) => candidateFromVideo(state, v, titleFallback)).filter(Boolean);
+}
+
 async function buildPayload(tab, url, extra) {
   const state = tab ? getState(tab.id) : emptyState();
   const pageUrl = (tab && tab.url) || url;
@@ -1129,12 +1469,16 @@ async function buildPayload(tab, url, extra) {
   const cfg = (await chrome.storage.sync.get("extension")).extension || {};
   let selectedVideo = state.videos.find(v => v.url.split("?")[0] === selected.split("?")[0]);
 
-  // Launching a video-only sub-playlist with no audio yet: recover audio from
-  // frame performance entries or a parent master manifest before handing off.
+  // Launching a video-only sub-playlist: use any already-captured audio
+  // immediately, but never block click-to-launch on network recovery.
   if (selectedVideo && isVideoOnlyVideo(selectedVideo) && !selectedVideo.audioUrl) {
-    const tabId = tab ? tab.id : -1;
-    await ensureAudioRecovery(tabId, selectedVideo.url, selectedVideo.headers || {}, selectedVideo.frameId);
-    selectedVideo = state.videos.find(v => v.url.split("?")[0] === selected.split("?")[0]);
+    const bestAudio = bestAudioForVideo(state, selectedVideo);
+    if (bestAudio) {
+      selectedVideo = { ...selectedVideo, audioUrl: bestAudio.url, audioHeaders: bestAudio.headers || {} };
+    } else {
+      const tabId = tab ? tab.id : -1;
+      void ensureAudioRecovery(tabId, selectedVideo.url, selectedVideo.headers || {}, selectedVideo.frameId);
+    }
   }
 
   const requestHeaders = selectedVideo?.headers || {};
@@ -1190,27 +1534,24 @@ async function buildPayload(tab, url, extra) {
     if (orderedAudio.length > 0) {
       const bestAudio = orderedAudio[0];
       audioUrl = bestAudio.url;
-      // Inherit headers from the audio track, falling back to video headers for Cookie/Referer/Origin/UA
-      if (bestAudio.headers) {
-        audioHeaders = { ...bestAudio.headers };
-      } else if (selectedVideo?.headers) {
-        audioHeaders = { ...selectedVideo.headers };
-      }
+      // Inherit the video session's Cookie/Referer/Origin/UA for every header
+      // the audio response did not carry itself.
+      audioHeaders = { ...(selectedVideo?.headers || {}), ...(bestAudio.headers || {}) };
     }
   } else if (audioUrl) {
     const audioVideo = state.videos.find(v => v.url.split("?")[0] === audioUrl.split("?")[0])
       || (state.audioStreams || []).find(v => v.url.split("?")[0] === audioUrl.split("?")[0]);
-    if (audioVideo?.headers) {
-      audioHeaders = { ...audioVideo.headers };
-    } else if (selectedVideo?.headers) {
-      audioHeaders = { ...selectedVideo.headers };
-    }
+    audioHeaders = { ...(selectedVideo?.headers || {}), ...((audioVideo && audioVideo.headers) || {}) };
   }
+
+  const title = (tab && tab.title) || state.page.title || "";
+  const candidates = rankedCandidates(state, selectedVideo, title);
+  const qualities = selectedVideo ? buildQualityTiers(selectedVideo, manifestInfo) : [];
 
   return {
     action: extra && extra.action ? extra.action : "play",
     url: playUrl,
-    title: (tab && tab.title) || state.page.title || "",
+    title,
     referer: requestHeaders.referer || pageUrl,
     userAgent: requestHeaders.userAgent || (extra && extra.userAgent) || navigator.userAgent,
     cookies: requestHeaders.cookie || cookies,
@@ -1225,6 +1566,8 @@ async function buildPayload(tab, url, extra) {
     audioHeaders,
     manifestInfo,
     isVerifiedMaster,
+    candidates,
+    qualities,
   };
 }
 
@@ -1370,8 +1713,15 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabState.delete(tabId);
+  liveTraffic.delete(tabId);
+  const timer = liveBoostTimers.get(tabId);
+  if (timer) clearTimeout(timer);
+  liveBoostTimers.delete(tabId);
   manifestResolution.forEach((_, key) => {
     if (key.startsWith(tabId + "|")) manifestResolution.delete(key);
+  });
+  preResolveInFlight.forEach((_, key) => {
+    if (key.startsWith(tabId + "|")) preResolveInFlight.delete(key);
   });
   audioProbeDone.forEach((key) => {
     if (key.startsWith(tabId + "|")) audioProbeDone.delete(key);

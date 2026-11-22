@@ -240,7 +240,17 @@ async function prewarmMpv() {
   if (await ipcAlive()) {
     return { ok: true, error: null, code: "OK", warmed: true, command: [] };
   }
-  const warmArgs = ["--idle=yes", "--force-window=no", "--input-ipc-server=" + ipcPath()];
+  const warmArgs = [
+    "--idle=yes",
+    "--force-window=no",
+    "--input-ipc-server=" + ipcPath(),
+    "--demuxer-lavf-analyzeduration=0.5",
+    "--demuxer-lavf-probesize=500000",
+    "--cache=yes",
+    "--cache-secs=15",
+    "--demuxer-readahead-secs=5",
+    "--hls-bitrate=max",
+  ];
   if (cfg.profile) warmArgs.push("--profile=" + cfg.profile);
   spawnMpv(mpvBin, warmArgs);
   return { ok: true, error: null, code: "OK", warmed: true, command: [] };

@@ -22,6 +22,7 @@ local PANEL = "161B22"
 local overlay = mp.create_osd_overlay("ass-events")
 local timer = nil
 local start_us = nil
+local fade_us = nil
 local visible = false
 local last_text = ""
 local base_w, base_h = 1920, 1080
@@ -108,19 +109,20 @@ local function render(now_us)
     update_base()
 
     local elapsed_ms = (now_us - start_us) / 1000
-    local total_ms = math.max(400, tonumber(opts.duration_ms) or 1200)
-    local fade_ms = clamp(tonumber(opts.fade_ms) or 260, 60, total_ms)
-    local fade_start = total_ms - fade_ms
+    local fade_ms = clamp(tonumber(opts.fade_ms) or 260, 60, 2000)
     local alpha = 0
-    if elapsed_ms >= total_ms then
-        overlay.data = ""
-        overlay:remove()
-        visible = false
-        last_text = ""
-        if timer then timer:kill(); timer = nil end
-        return
-    elseif elapsed_ms > fade_start then
-        alpha = math.floor(255 * clamp((elapsed_ms - fade_start) / fade_ms, 0, 1))
+    if fade_us then
+        local faded_ms = (now_us - fade_us) / 1000
+        if faded_ms >= fade_ms then
+            overlay.data = ""
+            overlay:remove()
+            visible = false
+            fade_us = nil
+            last_text = ""
+            if timer then timer:kill(); timer = nil end
+            return
+        end
+        alpha = math.floor(255 * clamp(faded_ms / fade_ms, 0, 1))
     end
 
     local t = elapsed_ms / 1000
@@ -244,6 +246,7 @@ local function stop_overlay()
     if timer then timer:kill(); timer = nil end
     visible = false
     start_us = nil
+    fade_us = nil
     last_text = ""
     overlay.data = ""
     overlay:remove()
@@ -259,14 +262,16 @@ local function start_overlay()
     end)
 end
 
-mp.register_event("file-loaded", function()
-    start_overlay()
-end)
+local function crossfade_out()
+    if visible and not fade_us then
+        fade_us = mp.get_time() * 1000000
+    end
+end
+
+mp.register_event("start-file", start_overlay)
 
 mp.observe_property("video-out-params", "native", function(_, value)
-    if visible and value then
-        stop_overlay()
-    end
+    if value then crossfade_out() end
 end)
 
 mp.register_event("end-file", stop_overlay)

@@ -350,9 +350,11 @@ audio1.ts`
   const lines = masterManifest.split("\n").filter((l) => l.trim());
   assert.strictEqual(lines[0], "#EXTM3U");
   assert.strictEqual(lines[1], "#EXT-X-VERSION:3");
-  assert.ok(lines[2].startsWith('#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio"'));
-  assert.ok(lines[3].startsWith("#EXT-X-STREAM-INF:BANDWIDTH=8000000,AUDIO=\"audio\""));
-  assert.strictEqual(lines[4], result.videoRelayUrl);
+  const mediaIdx = lines.findIndex((l) => l.startsWith("#EXT-X-MEDIA:TYPE=AUDIO"));
+  assert.ok(mediaIdx >= 0 && lines[mediaIdx].startsWith('#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio"'));
+  const streamIdx = lines.findIndex((l) => l.startsWith("#EXT-X-STREAM-INF"));
+  assert.ok(streamIdx >= 0 && lines[streamIdx].startsWith("#EXT-X-STREAM-INF:BANDWIDTH=8000000,AUDIO=\"audio\""));
+  assert.strictEqual(lines[streamIdx + 1], result.videoRelayUrl);
 
   stopRelay(result.token);
   videoServer.close();

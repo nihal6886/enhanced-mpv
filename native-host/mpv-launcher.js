@@ -19,7 +19,7 @@ const {
   ytdlSupported,
   joinHeaderFields,
 } = require("./sanitizer");
-const { startRelay, startMasterRelay } = require("./stream-relay");
+const { startRelay, startMasterRelay, fetchWithHeaders } = require("./stream-relay");
 
 let relayInProcess = false;
 
@@ -225,12 +225,33 @@ function resumeStart(startTime, duration) {
 function authHeaderObject(audioHeaders) {
   const h = audioHeaders || {};
   const out = {};
-  if (h.referer) out.Referer = h.referer;
-  if (h.origin) out.Origin = h.origin;
-  if (h.userAgent) out["User-Agent"] = h.userAgent;
-  if (h.cookie) out.Cookie = h.cookie;
+  const pick = (...keys) => {
+    for (const key of keys) {
+      if (h[key]) return h[key];
+      const match = Object.keys(h).find((name) => name.toLowerCase() === key.toLowerCase());
+      if (match && h[match]) return h[match];
+    }
+    return "";
+  };
+  const referer = pick("referer");
+  const origin = pick("origin");
+  const userAgent = pick("userAgent", "user-agent");
+  const cookie = pick("cookie");
+  if (referer) out.Referer = referer;
+  if (origin) out.Origin = origin;
+  if (userAgent) out["User-Agent"] = userAgent;
+  if (cookie) out.Cookie = cookie;
   return out;
 }
+
+const FAST_START_OPTIONS = {
+  "demuxer-lavf-analyzeduration": "0.5",
+  "demuxer-lavf-probesize": "500000",
+  "cache": "yes",
+  "cache-secs": "15",
+  "demuxer-readahead-secs": "5",
+  "hls-bitrate": "max",
+};
 
 function buildArgs(payload, subFiles, _mpvBin) {
   const cfg = readConfig();
@@ -239,6 +260,9 @@ function buildArgs(payload, subFiles, _mpvBin) {
   args.push("--force-window=immediate");
   args.push("--no-terminal");
   args.push("--input-ipc-server=" + ipcPath());
+  for (const [key, value] of Object.entries(FAST_START_OPTIONS)) {
+    args.push("--" + key + "=" + value);
+  }
   const title = sanitizeTitle(payload.title || "");
   if (title) args.push("--force-media-title=" + title);
   const headers = headerFields(payload);
@@ -593,6 +617,12 @@ const PER_FILE_OPTIONS = new Set([
   "sub-auto",
   "sid",
   "resume-playback",
+  "demuxer-lavf-analyzeduration",
+  "demuxer-lavf-probesize",
+  "cache",
+  "cache-secs",
+  "demuxer-readahead-secs",
+  "hls-bitrate",
 ]);
 
 function loadfilePlan(args) {
@@ -602,6 +632,7 @@ function loadfilePlan(args) {
     "force-media-title": "",
     sid: "auto",
     "resume-playback": "no",
+    ...FAST_START_OPTIONS,
   };
   let profile = null;
   let lavfAppend = null;
@@ -910,7 +941,14 @@ async function play(payload, mode) {
       await replaceViaIpc(launchPayload, args, target, wantQueue);
       appendLaunchLog("[" + new Date().toISOString() + "] IPC " + (wantQueue ? "append-play" : "replace") + " ok");
       void subtitleFilesPromise.then((files) => attachSubtitlesWhenReady(files, target));
-      return { ok: true, error: null, code: "OK", command, queued: wantQueue, reused: true };
+      publishSources(payload, launchPayload.url, target);
+      if (!wantQueue) {
+        const fallbacks = (Array.isArray(payload.candidates) ? payload.candidates : [])
+          .filter((c) => c && streamKey(c.url) !== streamKey(payload.url))
+          .slice(0, 2);
+        void monitorAndFailover(payload, launchPayload.url, target, fallbacks, mode, 0);
+      }
+      return { ok: true, error: null, code: "OK", command, queued: wantQueue, reused: true, playUrl: launchPayload.url };
     } catch (err) {
       appendLaunchLog("[" + new Date().toISOString() + "] IPC replace failed, respawning: " +
         String((err && err.message) || err));
@@ -926,7 +964,15 @@ async function play(payload, mode) {
       appendLaunchLog("[" + new Date().toISOString() + "] subtitle attach failed: " +
         String((err && err.message) || err));
     });
-    return { ok: true, error: null, code: "OK", command, queued: false };
+    const target = ipcPath();
+    publishSources(payload, launchPayload.url, target);
+    if (!wantQueue) {
+      const fallbacks = (Array.isArray(payload.candidates) ? payload.candidates : [])
+        .filter((c) => c && streamKey(c.url) !== streamKey(payload.url))
+        .slice(0, 2);
+      void monitorAndFailover(payload, launchPayload.url, target, fallbacks, mode, 0);
+    }
+    return { ok: true, error: null, code: "OK", command, queued: false, playUrl: launchPayload.url };
   } catch (err) {
     appendLaunchLog("[" + new Date().toISOString() + "] launch error: " +
       String((err && err.message) || err));
@@ -939,7 +985,167 @@ async function play(payload, mode) {
   }
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function streamKey(value) {
+  try {
+    const u = new URL(value);
+    return u.origin + u.pathname;
+  } catch {
+    return String(value || "");
+  }
+}
+
+function trimmedCandidate(c) {
+  if (!c || typeof c !== "object" || !isSafeUrl(c.url)) return null;
+  const out = {
+    url: c.url,
+    audioUrl: c.audioUrl && isSafeUrl(c.audioUrl) ? c.audioUrl : null,
+    audioHeaders: c.audioHeaders && typeof c.audioHeaders === "object" ? c.audioHeaders : {},
+    headers: c.headers && typeof c.headers === "object" ? c.headers : {},
+    title: sanitizeTitle(c.title || ""),
+    label: String(c.label || "").slice(0, 80),
+    quality: String(c.quality || "").slice(0, 40),
+    kind: String(c.kind || "").slice(0, 40),
+    width: Number(c.width) || 0,
+    height: Number(c.height) || 0,
+    bandwidth: Number(c.bandwidth) || 0,
+    codecs: String(c.codecs || "").slice(0, 120),
+    score: Number(c.score) || 0,
+    qualities: Array.isArray(c.qualities) ? c.qualities.map(trimmedQuality).filter(Boolean).slice(0, 12) : [],
+  };
+  if (c.referer) out.referer = String(c.referer).slice(0, 2048);
+  if (c.userAgent) out.userAgent = String(c.userAgent).slice(0, 512);
+  if (c.cookies) out.cookies = String(c.cookies).slice(0, 8192);
+  return out;
+}
+
+function trimmedQuality(q) {
+  if (!q || typeof q !== "object" || !isSafeUrl(q.url)) return null;
+  return {
+    url: q.url,
+    label: String(q.label || "").slice(0, 80),
+    height: Number(q.height) || 0,
+    width: Number(q.width) || 0,
+    bandwidth: Number(q.bandwidth) || 0,
+    codecs: String(q.codecs || "").slice(0, 120),
+    audio: String(q.audio || "").slice(0, 40),
+    audioUrl: q.audioUrl && isSafeUrl(q.audioUrl) ? q.audioUrl : null,
+    audioHeaders: q.audioHeaders && typeof q.audioHeaders === "object" ? q.audioHeaders : {},
+    headers: q.headers && typeof q.headers === "object" ? q.headers : {},
+  };
+}
+
+function sourcePayload(payload, playUrl) {
+  return {
+    title: sanitizeTitle(payload.title || ""),
+    currentUrl: payload.url || "",
+    currentPlayUrl: playUrl || payload.url || "",
+    candidates: (Array.isArray(payload.candidates) ? payload.candidates : []).map(trimmedCandidate).filter(Boolean),
+    qualities: (Array.isArray(payload.qualities) ? payload.qualities : []).map(trimmedQuality).filter(Boolean),
+    updatedAt: Date.now(),
+  };
+}
+
+function publishSources(payload, playUrl, target) {
+  const data = sourcePayload(payload, playUrl);
+  try {
+    ensureDir(configDir());
+    fs.writeFileSync(path.join(configDir(), "sources.json"), JSON.stringify(data), { encoding: "utf8", mode: 0o600 });
+  } catch {
+    // best effort - menu can still receive the IPC message
+  }
+  const json = JSON.stringify(data);
+  let attempt = 0;
+  const send = () => {
+    sendIpc(["script-message", "enhanced-mpv-sources", json], target, 500)
+      .then((reply) => {
+        if ((!reply || reply.error !== "success") && attempt++ < 8) setTimeout(send, 300);
+      })
+      .catch(() => {
+        if (attempt++ < 8) setTimeout(send, 300);
+      });
+  };
+  void send();
+}
+
+function applyCandidate(payload, candidate) {
+  const c = trimmedCandidate(candidate);
+  if (!c) return payload;
+  const candidates = (Array.isArray(payload.candidates) ? payload.candidates : [])
+    .filter((item) => item && streamKey(item.url) !== streamKey(c.url));
+  return {
+    ...payload,
+    ...c,
+    headers: { ...(payload.headers || {}), ...(c.headers || {}) },
+    audioHeaders: c.audioHeaders && Object.keys(c.audioHeaders).length ? c.audioHeaders : payload.audioHeaders,
+    candidates: [c, ...candidates].slice(0, 8),
+    qualities: Array.isArray(candidate.qualities) && candidate.qualities.length
+      ? candidate.qualities
+      : payload.qualities,
+  };
+}
+
+async function probeCandidate(candidate, timeoutMs) {
+  if (!candidate || !isSafeUrl(candidate.url)) return { terminal: true, status: 0 };
+  try {
+    const res = await fetchWithHeaders(candidate.url, candidate.headers || {}, timeoutMs || 3000);
+    return { terminal: [401, 403, 404, 410].includes(res.statusCode), status: res.statusCode };
+  } catch {
+    return { terminal: false, status: 0 };
+  }
+}
+
+async function videoParamsReady(target, playUrl) {
+  const [params, idle, currentPath] = await Promise.all([
+    sendIpc(["get_property", "video-out-params"], target, 250).catch(() => null),
+    sendIpc(["get_property", "idle-active"], target, 250).catch(() => null),
+    sendIpc(["get_property", "path"], target, 250).catch(() => null),
+  ]);
+  if (currentPath && currentPath.error === "success" && currentPath.data) {
+    const current = String(currentPath.data);
+    if (playUrl && current !== playUrl && !current.startsWith(playUrl.replace(/[^/]+$/, ""))) return null;
+  }
+  if (params && params.error === "success" && params.data && typeof params.data === "object") return true;
+  if (idle && idle.error === "success" && idle.data === true) return false;
+  return null;
+}
+
+async function monitorAndFailover(payload, playUrl, target, fallbacks, mode, depth) {
+  if (!fallbacks.length || depth >= 2) return;
+  const deadline = Date.now() + 3500;
+  const probe = probeCandidate(fallbacks[0], 3000);
+  while (Date.now() < deadline) {
+    await delay(200);
+    const ready = await videoParamsReady(target, playUrl);
+    if (ready === true) return;
+    const currentPath = await sendIpc(["get_property", "path"], target, 250).catch(() => null);
+    if (currentPath && currentPath.error === "success" && currentPath.data) {
+      const current = String(currentPath.data);
+      if (current !== playUrl && !current.startsWith(playUrl.replace(/[^/]+$/, ""))) return;
+    }
+    if (ready === false) break;
+  }
+  const probed = await probe;
+  const next = fallbacks[0];
+  appendLaunchLog("[" + new Date().toISOString() + "] failover trigger: no video-out-params for " +
+    playUrl + " probe=" + probed.status + " next=" + streamKey(next.url));
+  const nextPayload = applyCandidate({ ...payload, _failoverDepth: depth + 1 }, next);
+  const result = await fastDispatch(nextPayload, mode);
+  if (result.ok) {
+    appendLaunchLog("[" + new Date().toISOString() + "] failover candidate accepted: " + streamKey(next.url));
+  }
+}
+
 async function fastDispatch(payload, mode) {
+  const incoming = Array.isArray(payload && payload.candidates) ? payload.candidates : [];
+  const top = incoming[0] && trimmedCandidate(incoming[0]);
+  if (top && streamKey(top.url) !== streamKey(payload.url) && !payload._candidateHopped) {
+    return fastDispatch({ ...applyCandidate(payload, top), _candidateHopped: true }, mode);
+  }
+
   const url = payload && payload.url;
   if (!isSafeUrl(url) && !(url && isSafeLocalPath(url) && !String(url).includes("://"))) {
     return { ok: false, error: "Rejected URL", code: "BAD_URL", command: [] };
@@ -990,6 +1196,13 @@ async function fastDispatch(payload, mode) {
       });
     const totalMs = Date.now() - startedAt;
     appendLaunchLog("[" + new Date().toISOString() + "] fast_ipc_dispatch_ms=" + dispatchMs + " total_ms=" + totalMs);
+    publishSources(payload, launchPayload.url, target);
+    if (!wantQueue) {
+      const fallbacks = (Array.isArray(payload.candidates) ? payload.candidates : [])
+        .filter((c) => c && streamKey(c.url) !== streamKey(payload.url))
+        .slice(0, 2);
+      void monitorAndFailover(payload, launchPayload.url, target, fallbacks, mode, Number(payload._failoverDepth) || 0);
+    }
     return {
       ok: true,
       error: null,
@@ -1000,6 +1213,7 @@ async function fastDispatch(payload, mode) {
       fast: true,
       dispatchMs,
       totalMs,
+      playUrl: launchPayload.url,
     };
   } catch (err) {
     appendLaunchLog("[" + new Date().toISOString() + "] fast dispatch failed: " +
