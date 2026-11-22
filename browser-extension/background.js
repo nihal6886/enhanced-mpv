@@ -1864,6 +1864,9 @@ async function clearDaemonEndpoint() {
   try {
     await chrome.storage.local.remove(DAEMON_ENDPOINT_KEY);
   } catch { /* storage unavailable */ }
+  try {
+    await chrome.storage.session.remove(DAEMON_ENDPOINT_KEY);
+  } catch { /* storage unavailable */ }
 }
 
 async function daemonSend(payload, endpoint) {
@@ -1902,6 +1905,7 @@ let wsConnection = null;
 let wsReconnectTimer = null;
 let wsReconnectAttempts = 0;
 let wsHeartbeatAlarm = null;
+let wsReconnectInProgress = false; // Guard to prevent concurrent reconnect attempts
 const WS_MAX_RECONNECT_ATTEMPTS = 10;
 const WS_BASE_RECONNECT_DELAY_MS = 1000;
 const WS_MAX_RECONNECT_DELAY_MS = 30000;
@@ -1913,28 +1917,21 @@ function bgLog(msg) {
   try { console.log("[" + new Date().toISOString() + "] " + msg); } catch { /* ignore */ }
 }
 
-function getWsUrl() {
-  return new Promise((resolve) => {
-    getDaemonEndpoint().then((endpoint) => {
-      if (endpoint && endpoint.port) {
-        resolve("ws://127.0.0.1:" + endpoint.port + "/ws");
-      } else {
-        resolve(null);
-      }
-    });
-  });
-}
-
 function connectWebSocket() {
   if (wsConnection && (wsConnection.readyState === WebSocket.OPEN || wsConnection.readyState === WebSocket.CONNECTING)) {
     return;
   }
   
-  getWsUrl().then((url) => {
-    if (!url) {
+  // Always prewarm/spawn daemon first to get a verified fresh endpoint
+  prewarmNative().then((result) => {
+    if (!result || !result.endpoint || !result.endpoint.port) {
+      bgLog("WS: prewarmNative failed, scheduling reconnect");
       scheduleWsReconnect();
       return;
     }
+    
+    const endpoint = result.endpoint;
+    const url = "ws://127.0.0.1:" + endpoint.port + "/ws";
     
     try {
       wsConnection = new WebSocket(url);
@@ -1990,9 +1987,17 @@ function connectWebSocket() {
         const isAbnormalClosure = event.code === 1006;
         if (isAbnormalClosure) {
           bgLog("WS bridge abnormal closure (1006), clearing stale daemon endpoint");
-          void clearDaemonEndpoint().then(() => {
-            // Spawn/discover active daemon via Native Messaging
-            void prewarmNative().catch(() => {});
+          clearDaemonEndpoint().then(() => {
+            // Spawn/discover active daemon via Native Messaging - await completion
+            prewarmNative().then((result) => {
+              if (result && result.endpoint && result.endpoint.port) {
+                bgLog("WS: prewarmNative succeeded after 1006, new port=" + result.endpoint.port);
+              } else {
+                bgLog("WS: prewarmNative failed after 1006");
+              }
+            }).catch(() => {
+              bgLog("WS: prewarmNative error after 1006");
+            });
           });
         }
         bgLog("WS bridge closed: " + event.code + " " + event.reason);
@@ -2002,6 +2007,7 @@ function connectWebSocket() {
           chrome.alarms.clear("empv-ws-heartbeat");
           wsHeartbeatAlarm = null;
         }
+        // Debounced reconnect - only schedule if not already scheduled
         scheduleWsReconnect();
       };
       
@@ -2016,11 +2022,15 @@ function connectWebSocket() {
       bgLog("WS connection failed: " + err.message);
       scheduleWsReconnect();
     }
+  }).catch((err) => {
+    bgLog("WS prewarm failed: " + err.message);
+    scheduleWsReconnect();
   });
 }
 
 function scheduleWsReconnect() {
-  if (wsReconnectTimer) return;
+  if (wsReconnectTimer || wsReconnectInProgress) return;
+  wsReconnectInProgress = true;
   const delay = Math.min(
     WS_BASE_RECONNECT_DELAY_MS * Math.pow(2, wsReconnectAttempts) + Math.random() * 1000,
     WS_MAX_RECONNECT_DELAY_MS
@@ -2028,6 +2038,7 @@ function scheduleWsReconnect() {
   wsReconnectAttempts = Math.min(wsReconnectAttempts + 1, WS_MAX_RECONNECT_ATTEMPTS);
   wsReconnectTimer = setTimeout(() => {
     wsReconnectTimer = null;
+    wsReconnectInProgress = false;
     connectWebSocket();
   }, delay);
 }
