@@ -64,15 +64,6 @@ local function ease_out(t)
     return 1 - (1 - t) * (1 - t)
 end
 
-local function ass_rgb(rgb)
-    return string.format("&H%s&", rgb)
-end
-
-local function ass_alpha(alpha)
-    alpha = clamp(alpha or 0, 0, 255)
-    return string.format("&H%02X&", alpha)
-end
-
 local function update_base()
     local w, h = mp.get_osd_size()
     if w and h and w > 0 and h > 0 then
@@ -166,12 +157,7 @@ mp.register_script_message("sniffer_state_change", function(json)
     end
 end)
 
-mp.register_script_message("loading-screen-status", function(status)
-    -- Legacy support
-    if status and status ~= "" and not pipeline_stage:match("SHADOW_READY") then
-        -- Only use legacy status if not in advanced pipeline stage
-    end
-end)
+mp.register_script_message("loading-screen-status", function() end)
 
 local function get_dynamic_status()
     if pipeline_stage == "SHADOW_READY" then
@@ -304,7 +290,7 @@ local function render(now_us)
     local pill = safe_text(quality_pill(), "VIDEO")
     local pillW = clamp(200 + #pill * 7, 220, 480)
     local pillX = cx_pos - math.floor(pillW / 2)
-    
+
     a:new_event()
     a:pos(0, 0)
     a:append(string.format("{\\an5\\fs20\\b1\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", GREEN, alpha))
@@ -312,7 +298,7 @@ local function render(now_us)
     a:move_to(cx_pos - 100, badge_y)
     a:line_to(cx_pos + 100, badge_y)
     a:draw_stop()
-    
+
     a:new_event()
     a:pos(0, 0)
     a:append(string.format("{\\an5\\fs16\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", TEXT, alpha))
@@ -363,14 +349,14 @@ local function render(now_us)
     local barW, barH = 420, 6
     local barX = cx_pos - math.floor(barW / 2)
     local barY = cy_pos + 126
-    
+
     a:new_event()
     a:pos(0, 0)
     a:append(string.format("{\\an7\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", "243041", clamp(alpha + 30, 0, 255)))
     a:draw_start()
     a:round_rect_cw(barX, barY, barX + barW, barY + barH, 3)
     a:draw_stop()
-    
+
     a:new_event()
     a:pos(0, 0)
     a:append(string.format("{\\an7\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", GREEN, alpha))

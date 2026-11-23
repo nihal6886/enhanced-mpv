@@ -17,7 +17,7 @@ local mp = require("mp")
 local msg = require("mp.msg")
 local utils = require("mp.utils")
 
-local NEON_GREEN = "4ADE80"
+local advance_candidate, build_header_fields, get_stream_type
 
 -- Pipeline stages from daemon
 local PipelineStage = {
@@ -148,10 +148,10 @@ end
 
 local function switch_to_candidate(idx, preserve_time)
   if idx < 1 or idx > #state.candidates then return false end
-  
+
   local cand = state.candidates[idx]
   if not cand or not cand.url or cand.url == "" then return false end
-  
+
   local pos = preserve_time and (state.last_time_pos or 0) or 0
   local opts = {
     ytdl = "no",
@@ -164,53 +164,53 @@ local function switch_to_candidate(idx, preserve_time)
     ["hls-bitrate"] = "max",
     start = (pos > 1) and string.format("%.3f", pos) or "none",
   }
-  
+
   local hdrs = build_header_fields(cand.headers or {})
   if hdrs ~= "" then
     opts["http-header-fields"] = hdrs
   end
-  
+
   mp.commandv("change-list", "audio-files", "clr", "")
   if cand.audioUrl and cand.audioUrl ~= "" then
     mp.commandv("change-list", "demuxer-lavf-o", "append", "allowed_extensions=ALL")
     opts["audio-files-append"] = cand.audioUrl
   end
-  
+
   state.current_idx = idx
   state.current_url = cand.url
   state.verified = cand.verified or false
   state.stream_type = get_stream_type(cand.url)
   state.sniffer_state = PipelineStage.PROBING
   state.zero_wait_ready = false
-  
+
   update_loading_screen("PROBING STREAM " .. idx .. "/" .. #state.candidates .. "...")
   send_state_update("switching", { index = idx, total = #state.candidates, url = cand.url })
-  
+
   mp.command_native({ "loadfile", cand.url, "replace", -1, opts })
   mp.set_property_bool("pause", false)
-  
+
   -- Arm failover for new stream
   arm_failover()
-  
+
   return true
 end
 
-local function advance_candidate()
+advance_candidate = function()
   if #state.candidates <= 1 then
     msg.warn("stream-controller: no fallback candidates available")
     update_loading_screen("NO FALLBACK STREAMS")
     send_state_update("failover_exhausted", {})
     return false
   end
-  
+
   local next_idx = state.current_idx + 1
   if next_idx > #state.candidates then next_idx = 1 end
-  
+
   msg.info("stream-controller: failover to candidate " .. next_idx .. "/" .. #state.candidates)
   return switch_to_candidate(next_idx, true)
 end
 
-local function get_stream_type(url)
+get_stream_type = function(url)
   if not url or url == "" then return "UNKNOWN" end
   local u = url:lower()
   if u:match("ytdlp") or u:match("youtube%.com") or u:match("youtu%.be") or u:match("googlevideo%.com") then
@@ -227,7 +227,7 @@ local function get_stream_type(url)
   return "OTHER"
 end
 
-local function build_header_fields(headers)
+build_header_fields = function(headers)
   if type(headers) ~= "table" then return "" end
   local parts = {}
   for k, v in pairs(headers) do
@@ -242,13 +242,13 @@ end
 -- Apply PipelineState from daemon
 local function apply_pipeline_state(ps)
   if not ps or not ps.stage then return end
-  
+
   local prevStage = state.sniffer_state
   state.sniffer_state = ps.stage
   state.relay_stats = ps.relayStats or {}
   state.prewarm_ms = ps.prewarmMs or 0
   state.launch_ms = ps.launchMs or 0
-  
+
   -- Update candidates if provided
   if ps.candidates and #ps.candidates > 0 then
     state.candidates = ps.candidates
@@ -257,13 +257,10 @@ local function apply_pipeline_state(ps)
       state.current_idx = 1
     end
   end
-  if ps.qualities then
-    -- qualities handled by player-menus.lua
-  end
   if ps.candidate then
     state.current_title = ps.candidate.title or state.current_title
   end
-  
+
   -- React to stage transitions
   if ps.stage == PipelineStage.SHADOW_READY then
     state.zero_wait_ready = true
@@ -288,9 +285,9 @@ local function apply_pipeline_state(ps)
     state.zero_wait_ready = false
     update_loading_screen("IDLE")
   end
-  
-  send_state_update("pipeline_state_applied", { 
-    stage = ps.stage, 
+
+  send_state_update("pipeline_state_applied", {
+    stage = ps.stage,
     prevStage = prevStage,
     candidate = ps.candidate,
     relayStats = state.relay_stats,
@@ -305,7 +302,7 @@ mp.register_event("file-loaded", function()
   state.last_duration = mp.get_property_number("duration") or 0
   state.video_width = mp.get_property_number("width") or 0
   state.video_height = mp.get_property_number("height") or 0
-  
+
   local path = mp.get_property("path") or ""
   if path ~= state.current_url and #state.candidates > 0 then
     -- New file loaded via external means (e.g., mpv-launcher.js)
@@ -320,7 +317,7 @@ mp.register_event("file-loaded", function()
       end
     end
   end
-  
+
   disarm_failover()
   arm_failover()
   update_loading_screen("BUFFERING...")
@@ -377,7 +374,7 @@ mp.register_script_message("stream-controller-load", function(json)
     state.bridge_candidate_count = #data.candidates
     msg.info("stream-controller: loaded " .. #state.candidates .. " candidates via IPC")
     send_state_update("candidates_loaded", { count = #state.candidates })
-    
+
     -- If we were probing/failover and now have verified candidates, switch immediately
     if state.failover_armed or state.loading_state == "PROBING" or state.loading_state == "FAILOVER" then
       local verified_idx, verified_cand = find_verified_candidate()
@@ -386,7 +383,7 @@ mp.register_script_message("stream-controller-load", function(json)
         switch_to_candidate(verified_idx, true)
       end
     end
-    
+
     if not had_candidates then
       arm_failover()
     end
@@ -399,34 +396,34 @@ mp.register_script_message("enhanced-mpv-sources", function(json)
   if ok and data and data.candidates then
     local old_count = #state.candidates
     local had_candidates = old_count > 0
-    
+
     state.candidates = data.candidates
     state.bridge_candidate_count = #data.candidates
-    
+
     -- Update current index if it was valid
     if state.current_idx > #state.candidates then
       state.current_idx = 1
     end
-    
+
     if #state.candidates > 0 then
       state.current_title = data.title or state.current_title
       state.current_url = data.current_url or state.current_url
       state.verified = data.verified or false
     end
-    
+
     msg.info("stream-controller: hot-reloaded " .. #state.candidates .. " candidates from WebSocket bridge")
-    send_state_update("candidates_hot_reloaded", { 
-      count = #state.candidates, 
+    send_state_update("candidates_hot_reloaded", {
+      count = #state.candidates,
       old_count = old_count,
-      title = state.current_title 
+      title = state.current_title
     })
-    
+
     -- Hot-reload quality/source menus by notifying player-menus.lua
     mp.commandv("script-message", "player-menus-refresh", utils.format_json({
       candidates = state.candidates,
       current_index = state.current_idx
     }))
-    
+
     -- If we were probing/failover and now have verified candidates, switch immediately
     if state.failover_armed or state.loading_state == "PROBING" or state.loading_state == "FAILOVER" then
       local verified_idx, verified_cand = find_verified_candidate()
@@ -439,7 +436,7 @@ mp.register_script_message("enhanced-mpv-sources", function(json)
         switch_to_candidate(1, false)
       end
     end
-    
+
     if not had_candidates and #state.candidates > 0 then
       arm_failover()
     end
@@ -502,8 +499,8 @@ end)
 load_candidates()
 
 -- Initial state broadcast
-send_state_update("initialized", { 
-  candidates = state.candidates, 
+send_state_update("initialized", {
+  candidates = state.candidates,
   current_index = state.current_idx,
   bridge_connected = state.bridge_connected,
   bridge_candidate_count = state.bridge_candidate_count

@@ -21,13 +21,14 @@ local mp = require("mp")
 local utils = require("mp.utils")
 local msg = require("mp.msg")
 
+local render
+
+
 local NEON_GREEN = "4ADE80"
 local DARK_BG = "0D1117"
-local DARK_CARD = "161B22"
 local TEXT_WHITE = "E6EDF3"
 local TEXT_MUTED = "8B949E"
 local BORDER_COLOR = "30363D"
-local GREEN_DIM = "2D5A43"
 local RED = "FF453A"
 local ORANGE = "FFA500"
 local AMBER = "FBBF24"
@@ -41,7 +42,6 @@ local last_errors = {}
 local bridge_status = { connected = false, candidate_count = 0, last_update = 0 }
 local player_telemetry = { time_pos = 0, pause = false, width = 0, height = 0, demuxer_cache = 0, media_title = "" }
 local pipeline_stage = "IDLE"
-local pipeline_candidate = nil
 local pipeline_relay_stats = {}
 local pipeline_prewarm_ms = 0
 local pipeline_launch_ms = 0
@@ -147,7 +147,6 @@ mp.register_script_message("pipeline_state_applied", function(json)
   local ok, data = pcall(utils.parse_json, json)
   if ok and data then
     pipeline_stage = data.stage or pipeline_stage
-    pipeline_candidate = data.candidate
     pipeline_relay_stats = data.relayStats or {}
     pipeline_prewarm_ms = data.prewarmMs or 0
     pipeline_launch_ms = data.launchMs or 0
@@ -162,7 +161,6 @@ mp.register_script_message("shadow_ready", function(json)
   if ok and data then
     zero_wait_ready = true
     pipeline_stage = "SHADOW_READY"
-    pipeline_candidate = data.candidate
     pipeline_prewarm_ms = data.prewarmMs or 0
     if visible then render() end
   end
@@ -225,7 +223,7 @@ local function get_pipeline_stage_label(stage)
   return labels[stage] or stage
 end
 
-local function render()
+render = function()
   if not visible then return end
   update_candidates()
   stream_info = get_stream_info()
@@ -252,10 +250,10 @@ local function render()
   local bridge_status_text = bridge_status.connected and "BRIDGE: LOOPBACK LIVE" or "BRIDGE: OFFLINE"
   local bridge_status_color = bridge_status.connected and NEON_GREEN or RED
   local bridge_candidates = bridge_status.candidate_count > 0 and ("  |  CANDIDATES: " .. bridge_status.candidate_count) or ""
-  
+
   table.insert(a, string.format("{\\an7\\pos(%d,%d)\\fs28\\b1\\bord0\\shad0\\1c%s}STREAM & SNIFFER INSPECTOR  %s%s%s",
     x + 6, y + 6, ass_rgb(NEON_GREEN),
-    string.format("{\\fs16\\1c%s}%s%s  %s", ass_rgb(bridge_status_color), bridge_status_text, bridge_candidates, 
+    string.format("{\\fs16\\1c%s}%s%s  %s", ass_rgb(bridge_status_color), bridge_status_text, bridge_candidates,
       string.format("{\\fs14\\1c%s}Ctrl+Shift+D to close", ass_rgb(TEXT_MUTED)))))
 
   -- PipelineState indicator row
@@ -295,18 +293,18 @@ local function render()
     add_row("Candidate:", string.format("%d / %d  (%s)", candidate_idx, total, cand.kind or "stream"), NEON_GREEN, true)
     add_row("Title:", cand.title or "N/A", TEXT_WHITE)
     add_row("Stream Type:", get_stream_type(cand.url), TEXT_WHITE)
-    
+
     -- URLs
     local url_display = cand.url
     if #url_display > 95 then url_display = url_display:sub(1, 92) .. "..." end
     add_row("Resolved URL:", url_display, TEXT_MUTED)
-    
+
     if cand.audioUrl and cand.audioUrl ~= "" then
       local aurl = cand.audioUrl
       if #aurl > 95 then aurl = aurl:sub(1, 92) .. "..." end
       add_row("Audio URL:", aurl, TEXT_MUTED)
     end
-    
+
     -- Headers status
     local hdrs = extract_headers(cand.headers or "")
     local referer_ok = hdrs.referer and "OK" or "MISSING"
@@ -316,7 +314,7 @@ local function render()
     local auth_ok = hdrs.authorization and "OK" or "MISSING"
     add_row("Headers:", string.format("Referer:%s  Origin:%s  Cookie:%s  UA:%s  Auth:%s",
       referer_ok, origin_ok, cookie_ok, ua_ok, auth_ok), TEXT_WHITE)
-    
+
     -- Qualities
     if cand.qualities and #cand.qualities > 0 then
       local qlabels = {}
@@ -325,7 +323,7 @@ local function render()
       end
       add_row("Qualities:", table.concat(qlabels, "  |  "), TEXT_MUTED)
     end
-    
+
     add_row("Score:", tostring(cand.score or 0), TEXT_WHITE)
     add_row("Verified:", cand.verified and "YES" or "NO", cand.verified and NEON_GREEN or RED)
   else
@@ -345,7 +343,7 @@ local function render()
   local live_height = player_telemetry.height or stream_info.height
   local live_demuxer_cache = player_telemetry.demuxer_cache or stream_info.demuxer_cache
   local live_media_title = player_telemetry.media_title or mp.get_property("media-title") or ""
-  
+
   add_row("Media Title:", safe_ass(live_media_title, "N/A"), TEXT_WHITE)
   add_row("Resolution:", string.format("%dx%d", live_width, live_height), live_width > 0 and NEON_GREEN or TEXT_MUTED)
   add_row("Time Pos:", string.format("%.1fs / %.1fs", live_time_pos, stream_info.duration), TEXT_WHITE)

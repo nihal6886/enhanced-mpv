@@ -16,6 +16,8 @@ read_globals = {
   "jit",
 }
 
+exclude_files = { "mpv-config/scripts/modernz.lua" }
+
 files["mpv-config/scripts/*.lua"] = {
   ignore = { "212", "631" },
 }

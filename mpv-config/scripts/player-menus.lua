@@ -209,7 +209,7 @@ local function build_menu_ass(title, items, selected)
     local border = is_selected and NEON_GREEN or BORDER_COLOR
     local text_color = is_active and NEON_GREEN or TEXT_WHITE
     local prefix = is_active and "* " or "  "
-    
+
     local display_label = item.label
     if item.qualities and type(item.qualities) == "table" and #item.qualities > 0 then
       local quality_lines = {}
@@ -240,7 +240,7 @@ local function build_menu_ass(title, items, selected)
         display_label = item.label .. "\\N" .. table.concat(quality_lines, "\\N")
       end
     end
-    
+
     table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\bord1\\shad0\\1c%s\\3c%s\\alpha&H10&}{\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}", x - 8, row_y - 4, ass_rgb(bg_color), ass_rgb(border), w - 20, w - 20, row_h - 6, row_h - 6))
     table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs22\\bord0\\shad0\\1c%s}%s%s", x + 6, row_y + 2, ass_rgb(text_color), prefix, safe_ass_text(display_label)))
   end
