@@ -1,23 +1,7 @@
-std = "luajit"
-max_line_length = 140
-unused_args = false
-allow_defined_top = true
-
-globals = {
-  "mp",
-  "msg",
-  "utils",
-  "options",
-  "input",
-}
-
-read_globals = {
-  "bit",
-  "jit",
-}
-
-exclude_files = { "mpv-config/scripts/modernz.lua" }
-
-files["mpv-config/scripts/*.lua"] = {
-  ignore = { "212", "631" },
+﻿std = "luajit"
+globals = { "mp" }
+exclude_files = {
+  "mpv-config/scripts/modernz.lua",
+  "mpv-config/scripts/thumbfast.lua",
+  "mpv-config/scripts/sub-select.lua",
 }

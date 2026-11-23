@@ -405,12 +405,15 @@ function createHoverPill() {
 function updateHoverPillPosition(video) {
   if (!hoverPill || !video) return;
   const rect = video.getBoundingClientRect();
-  const scrollX = window.scrollX || window.pageXOffset;
-  const scrollY = window.scrollY || window.pageYOffset;
-  
-  // Position at top-right of video
-  hoverPill.style.left = (rect.right + scrollX - hoverPill.offsetWidth - 8) + "px";
-  hoverPill.style.top = (rect.top + scrollY + 8) + "px";
+  const pillWidth = hoverPill.getBoundingClientRect().width || hoverPill.offsetWidth;
+  const pillHeight = hoverPill.getBoundingClientRect().height || hoverPill.offsetHeight;
+  const maxLeft = Math.max(0, window.innerWidth - pillWidth);
+  const maxTop = Math.max(0, window.innerHeight - pillHeight);
+  // Fixed viewport coordinates keep the closed shadow host above overflow-clipped players.
+  const left = Math.min(maxLeft, Math.max(0, rect.right - pillWidth - 8));
+  const top = Math.min(maxTop, Math.max(0, rect.top + 8));
+  hoverPill.style.left = `${left}px`;
+  hoverPill.style.top = `${top}px`;
 }
 
 function showHoverPill(video) {
