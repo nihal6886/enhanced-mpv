@@ -36,10 +36,8 @@ OutputDir=..\dist
 OutputBaseFilename=EnhancedMPV-Setup
 Compression=lzma2/max
 SolidCompression=yes
-WizardStyle=modern
+WizardStyle=modern dynamic
 SetupIconFile=staging\assets\enhanced-mpv.ico
-WizardImageFile=staging\assets\wizard-banner.bmp
-WizardSmallImageFile=staging\assets\wizard-small.bmp
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
@@ -54,6 +52,9 @@ DisableWelcomePage=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\extension"
 
 [Files]
 ; --- offline payload (everything except mpv / yt-dlp) ----------------------
@@ -75,7 +76,7 @@ Source: "{tmp}\yt-dlp.exe"; DestDir: "{app}\bin"; Flags: external ignoreversion 
 Source: "{tmp}\mpv.7z"; DestDir: "{localappdata}\Programs\mpv"; Flags: external extractarchive recursesubdirs createallsubdirs ignoreversion skipifsourcedoesntexist; Check: WantMpvArchiveFile
 
 [Icons]
-Name: "{userprograms}\Enhanced MPV\Setup Guide"; Filename: "{code:OnboardingUrl}"
+Name: "{userprograms}\Enhanced MPV\Setup Guide"; Filename: "{app}\onboarding\index.html"
 Name: "{userprograms}\Enhanced MPV\Enhanced MPV"; Filename: "{code:MpvExeForIcon}"; WorkingDir: "{app}\mpv"; IconFilename: "{app}\mpv\enhanced-mpv.ico"; Comment: "Enhanced MPV player"; Check: HaveMpvForIcon
 Name: "{userprograms}\Enhanced MPV\Uninstall Enhanced MPV"; Filename: "{uninstallexe}"
 
@@ -88,13 +89,14 @@ Root: HKCU; Subkey: "Software\BraveSoftware\Brave\NativeMessagingHosts\{#HostNam
 Root: HKCU; Subkey: "Software\Mozilla\NativeMessagingHosts\{#HostName}"; ValueType: string; ValueName: ""; ValueData: "{app}\manifests\{#HostName}.firefox.json"; Flags: uninsdeletekey
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\install.ps1"" -Yes -SkipDeps -ExtensionId ""{#ExtId}"" -OpenOnboarding"; Description: "Finish installing Enhanced MPV and open the setup guide"; Flags: runhidden waituntilterminated
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\install.ps1"" -Yes -SkipDeps -ExtensionId ""{#ExtId}"""; Description: "Finish installing Enhanced MPV"; Flags: runhidden waituntilterminated
+Filename: "{app}\onboarding\index.html"; Description: "Open Enhanced MPV Extension Setup Guide"; Flags: shellexec postinstall skipifsilent
 Filename: "{code:GetChromeExe}"; Parameters: "chrome://extensions"; Description: "Open Chrome extensions page (paste the folder we copied)"; Flags: postinstall nowait skipifsilent; Check: LaunchChrome
 Filename: "{code:GetBraveExe}"; Parameters: "brave://extensions"; Description: "Open Brave extensions page (paste the folder we copied)"; Flags: postinstall nowait skipifsilent; Check: LaunchBrave
 Filename: "{code:GetEdgeExe}"; Parameters: "edge://extensions"; Description: "Open Edge extensions page (paste the folder we copied)"; Flags: postinstall nowait skipifsilent; Check: LaunchEdge
 
 [UninstallRun]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\install.ps1"" -Uninstall -Yes"; Flags: runhidden waituntilterminated
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\install.ps1"" -Uninstall -Yes"; Flags: runhidden waituntilterminated; RunOnceId: "EnhancedMPV.UninstallCleanup"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\browser-extension"
@@ -129,43 +131,7 @@ var
   WantModernZLua: Boolean;
   WantModernZFont: Boolean;
 
-  RceditExe: String;
-
 // ----------------------------------------------------------------- helpers --
-
-function HexByte(B: Integer): String;
-var
-  HexChars: String;
-begin
-  HexChars := '0123456789ABCDEF';
-  Result := Copy(HexChars, (B shr 4) + 1, 1) + Copy(HexChars, (B and $0F) + 1, 1);
-end;
-
-function UrlEncodeComponent(const S: String): String;
-var
-  I: Integer;
-  C: Char;
-begin
-  Result := '';
-  for I := 1 to Length(S) do
-  begin
-    C := S[I];
-    if ((C >= 'A') and (C <= 'Z')) or ((C >= 'a') and (C <= 'z')) or ((C >= '0') and (C <= '9')) or (C = '-') or (C = '_') or (C = '.') or (C = '~') then
-      Result := Result + C
-    else if C = ' ' then
-      Result := Result + '%20'
-    else
-      Result := Result + '%' + HexByte(Ord(C));
-  end;
-end;
-
-function OnboardingUrl(Param: String): String;
-var
-  ExtPath: String;
-begin
-  ExtPath := ExpandConstant('{app}\browser-extension');
-  Result := ExpandConstant('{app}\onboarding\index.html') + '?extPath=' + UrlEncodeComponent(ExtPath);
-end;
 
 function FirstExisting(const Paths: array of String): String;
 var
@@ -396,7 +362,6 @@ end;
 function InstallMpvDirect: Boolean;
 var
   MpvUrl: String;
-  ResultCode: Integer;
 begin
   Result := False;
   MpvUrl := ResolveMpvDirectUrl;
@@ -1033,16 +998,7 @@ end;
 
 procedure InitializeWizard;
 begin
-  // Dark studio theme: #0D1117 background, #4ADE80 neon green accent
-  // Note: TSetupForm.Color is not available; background is controlled by wizard bitmaps
-  WizardForm.Font.Color := $FFFFFF;
-  WizardForm.BeveledLabel.Color := $17110D;
-  WizardForm.BeveledLabel.Font.Color := $FFFFFF;
-  WizardForm.PageDescriptionLabel.Color := $171117; // slightly lighter
-  WizardForm.PageDescriptionLabel.Font.Color := $A8DE80; // dimmed neon green
-  WizardForm.PageNameLabel.Color := $17110D;
-  WizardForm.PageNameLabel.Font.Color := $80DE4A; // #4ADE80 in BGR
-  WizardForm.MainPanel.Color := $17110D;
+  WizardForm.WelcomeLabel2.Caption := 'Enhanced MPV is ready to install. Choose the browsers to connect, then finish setup to install the native player and extension.';
 
   ProgressPage := CreateOutputProgressPage('Preparing dependencies',
     'Enhanced MPV is checking for mpv and yt-dlp. If they are missing they will be installed now.');

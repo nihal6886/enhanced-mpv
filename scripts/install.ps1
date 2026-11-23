@@ -694,9 +694,10 @@ for ($attempt = 1; $attempt -le 30; $attempt++) {
 }
 if (-not $healthOk) { Write-Warning "Launch daemon did not become healthy during the install check." }
 if ($OpenOnboarding) {
-  $onboarding = Join-Path $Root "onboarding\index.html"
-  if (Test-Path $onboarding) {
-    $extensionPath = [uri]::EscapeDataString((Join-Path $Root "browser-extension"))
-    Start-Process -FilePath ($onboarding + "?extPath=" + $extensionPath)
-  }
+  $onboardingCandidates = @(
+    (Join-Path $Root "onboarding\index.html"),
+    (Join-Path $Root "installer\onboarding\index.html")
+  )
+  $onboarding = $onboardingCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+  if ($onboarding) { Start-Process -FilePath $onboarding }
 }

@@ -289,13 +289,21 @@ end
 -- while the user browses. Only an explicit launch message reveals it.
 local function hide_standby()
   local hwnd = find_window()
-  if hwnd and hwnd ~= 0 and not window_revealed then
+  local path = mp.get_property("path")
+  local idle = mp.get_property_native("idle-active")
+  if hwnd and hwnd ~= 0 and not window_revealed and idle == true and (not path or path == "") then
     pcall(function() user32.ShowWindow(ffi.cast("void*", hwnd), SW_HIDE) end)
   end
 end
 
 local function reapply()
   pcall(do_apply)
+  local path = mp.get_property("path")
+  local idle = mp.get_property_native("idle-active")
+  if not window_revealed and path and path ~= "" and idle ~= true then
+    local hwnd = find_window()
+    if hwnd and hwnd ~= 0 then reveal_window(hwnd) end
+  end
 end
 
 -- Handle script-message bring-to-front from mpv-launcher.js (a reused window

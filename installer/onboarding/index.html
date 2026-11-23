@@ -663,7 +663,7 @@
             <span class="task-title"><span class="step-num">3.</span>Paste the folder path</span>
             <span class="task-desc">In the folder window, press <kbd id="mod-key">Ctrl</kbd> + <kbd>V</kbd> and press <kbd id="enter-key">Enter</kbd>.</span>
             <span class="task-desc" style="margin-top:8px;">Extension folder:
-              <code id="ext-path" style="display:inline-block;margin-top:4px;padding:4px 8px;border:1px solid var(--border-bright);background:var(--term-elevated);color:var(--green);cursor:pointer;user-select:all;">%LOCALAPPDATA%\Programs\Enhanced MPV\extension</code>
+              <code id="ext-path" style="display:inline-block;margin-top:4px;padding:4px 8px;border:1px solid var(--border-bright);background:var(--term-elevated);color:var(--green);cursor:pointer;user-select:all;">%LOCALAPPDATA%\Programs\Enhanced MPV\browser-extension</code>
               <span id="copy-status" style="margin-left:8px;color:var(--muted);font-size:11px;">click to copy</span>
             </span>
           </span>
@@ -715,7 +715,7 @@
   const extPathEl = document.getElementById("ext-path");
   const copyStatusEl = document.getElementById("copy-status");
   const params = new URLSearchParams(window.location.search);
-  const extPath = params.get("extPath") || "%LOCALAPPDATA%\\Programs\\Enhanced MPV\\extension";
+  const extPath = params.get("extPath") || "%LOCALAPPDATA%\\Programs\\Enhanced MPV\\browser-extension";
   extPathEl.textContent = extPath;
   extPathEl.title = "Click to copy extension path";
   extPathEl.addEventListener("click", async () => {

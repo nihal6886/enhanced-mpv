@@ -157,19 +157,24 @@ async function startPreload(candidate, tabId, startTime) {
     const opts = {
       pause: "yes",
       start: startTime && startTime > 0 ? "+" + Math.floor(startTime) : "none",
+      "http-header-fields": "",
+      ytdl: "yes",
+      "audio-file": "",
       "demuxer-lavf-analyzeduration": "0.25",
       "demuxer-lavf-probesize": "131072",
       cache: "yes",
-      "cache-secs": "15",
-      "demuxer-readahead-secs": "8",
+      "cache-secs": "20",
+      "demuxer-max-bytes": "64MiB",
+      "demuxer-readahead-secs": "10",
       "cache-pause-initial": "no",
-      "cache-pause-wait": "0.1",
+      "cache-pause-wait": "0.25",
       "vd-lavc-threads": "0",
       "hls-bitrate": "max",
       "force-media-title": sanitizeTitle(candidate.title || "Enhanced MPV"),
     };
     const headerOption = buildHeaderOption(candidate);
-    if (headerOption) opts["http-header-fields"] = headerOption;
+    opts["http-header-fields"] = headerOption || "";
+    await sendPersistentIpc(["change-list", "audio-files", "clr", ""], 250).catch(() => {});
     const reply = await sendPersistentIpc(["loadfile", candidate.url, "replace", -1, opts], 1200);
     appendLaunchLog(
       "[" + new Date().toISOString() + "] preload loadfile " +
@@ -250,19 +255,24 @@ async function executeColdLaunch(candidate, startTime, title) {
 
   const opts = {
     start: startTime && startTime > 0 ? String(startTime) : "none",
+    "http-header-fields": "",
+    ytdl: "yes",
+    "audio-file": "",
     "demuxer-lavf-analyzeduration": "0.25",
     "demuxer-lavf-probesize": "131072",
     cache: "yes",
-    "cache-secs": "15",
-    "demuxer-readahead-secs": "8",
-    "cache-pause-wait": "0.1",
+    "cache-secs": "20",
+    "demuxer-max-bytes": "64MiB",
+    "demuxer-readahead-secs": "10",
+    "cache-pause-wait": "0.25",
     "hls-bitrate": "max",
     "cache-pause-initial": "no",
     "initial-audio-sync": "no",
     "force-media-title": sanitizeTitle(title || candidate.title || "Enhanced MPV"),
   };
   const headerOption = buildHeaderOption(candidate);
-  if (headerOption) opts["http-header-fields"] = headerOption;
+  opts["http-header-fields"] = headerOption || "";
+  await sendPersistentIpc(["change-list", "audio-files", "clr", ""], 250).catch(() => {});
 
   // A standby process is useful only when mpv has created its native window.
   // Give the IPC pipe 200 ms to report the HWND before taking the visible
@@ -630,10 +640,11 @@ async function spawnStandbyMpv() {
     "--demuxer-lavf-analyzeduration=0.25",
     "--demuxer-lavf-probesize=131072",
     "--cache=yes",
-    "--cache-secs=15",
-    "--demuxer-readahead-secs=8",
+    "--cache-secs=20",
+    "--demuxer-max-bytes=64MiB",
+    "--demuxer-readahead-secs=10",
     "--cache-pause-initial=no",
-    "--cache-pause-wait=0.1",
+    "--cache-pause-wait=0.25",
     "--vd-lavc-threads=0",
     "--hls-bitrate=max",
     "--log-file=" + path.join(configDir(), "mpv-runtime.log"),

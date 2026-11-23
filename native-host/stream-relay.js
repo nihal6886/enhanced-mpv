@@ -138,14 +138,14 @@ async function prefetchStreamSegments(masterUrl, headers) {
 
     if (urlsToFetch.length === 0) return;
 
-    const results = await fetchSegmentsConcurrently(urlsToFetch, headers, { concurrency: 3 });
-
-    // 5. Store init data and the first two segments separately in the RAM LRU.
-    for (let i = 0; i < results.length; i++) {
-      if (results[i].ok) {
-        addToPrefetchCache(resourceCacheKey(urlsToFetch[i]), results[i].res.body);
-      }
-    }
+    // 5. Publish each completed chunk as soon as it arrives. mpv can consume
+    //    the init segment / first media chunk while later prefetches continue.
+    await fetchSegmentsConcurrently(urlsToFetch, headers, {
+      concurrency: 3,
+      onResult: (result, index) => {
+        if (result.ok) addToPrefetchCache(resourceCacheKey(urlsToFetch[index]), result.res.body);
+      },
+    });
   } catch {
     // Silently ignore prefetch failures
   } finally {
@@ -421,8 +421,14 @@ async function fetchSegmentsConcurrently(urls, headers, options = {}) {
         const i = idx++;
         running++;
         fetchWithHeaders(urls[i], headers).then(
-          (res) => { results[i] = { ok: true, res }; },
-          (err) => { results[i] = { ok: false, err }; }
+          (res) => {
+            results[i] = { ok: true, res };
+            if (typeof options.onResult === "function") options.onResult(results[i], i);
+          },
+          (err) => {
+            results[i] = { ok: false, err };
+            if (typeof options.onResult === "function") options.onResult(results[i], i);
+          }
         ).finally(() => {
           running--;
           done++;

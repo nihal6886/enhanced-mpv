@@ -2310,7 +2310,9 @@ if (chrome.commands && chrome.commands.onCommand) {
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
       const tab = tabs[0];
       if (!tab || !tab.id || !tab.url) return;
-      await launch(tab, tab.url, "play", { startTimeSource: "shortcut" });
+      const takeover = chrome.tabs.sendMessage(tab.id, { type: "TAKEOVER_PAUSE" }).catch(() => null);
+      const launchTask = launch(tab, tab.url, "play", { startTimeSource: "shortcut" });
+      await Promise.all([takeover, launchTask]);
     } catch (err) {
       bgLog("launch-active failed: " + String((err && err.message) || err));
     }
