@@ -30,6 +30,7 @@ local LR_LOADFROMFILE = 0x00000010
 
 -- Window show/restore/foreground constants
 local SW_RESTORE = 9
+local SW_HIDE = 0
 local HWND_TOPMOST = -1
 local HWND_NOTOPMOST = -2
 local SWP_NOSIZE = 0x0001
@@ -286,7 +287,6 @@ end
 local function do_apply()
   local hwnd = find_window()
   if not hwnd or hwnd == 0 then return end
-  reveal_window(hwnd)
   local path = icon_path()
   if path then pcall(apply_icon, hwnd, path) end
   pcall(function()
@@ -294,6 +294,15 @@ local function do_apply()
   end)
   -- Apply DWM theme (fails silently on older Windows)
   pcall(apply_dwm_theme, hwnd)
+end
+
+-- The standby player owns a real HWND, but must remain completely hidden
+-- while the user browses. Only an explicit launch message reveals it.
+local function hide_standby()
+  local hwnd = find_window()
+  if hwnd and hwnd ~= 0 and not window_revealed then
+    pcall(function() user32.ShowWindow(ffi.cast("void*", hwnd), SW_HIDE) end)
+  end
 end
 
 local function reapply()
@@ -305,27 +314,31 @@ end
 mp.register_script_message("bring-to-front", function()
   window_revealed = false
   pcall(do_apply)
+  local hwnd = find_window()
+  if hwnd and hwnd ~= 0 then reveal_window(hwnd) end
 end)
 
 -- Handle enhanced-mpv-focus message for instant foreground focus on loadfile
 mp.register_script_message("enhanced-mpv-focus", function()
   window_revealed = false
   pcall(do_apply)
+  local hwnd = find_window()
+  if hwnd and hwnd ~= 0 then reveal_window(hwnd) end
 end)
 
--- IMMEDIATE reveal at script load (top-level) for <100ms window popup
--- Run once immediately, then again on vo-configured when GPU window is ready
-mp.add_timeout(0, reapply)
+-- Apply chrome without revealing the standby window. Hide again after VO setup
+-- because mpv may show its HWND while constructing the video output.
+mp.add_timeout(0, function() reapply(); hide_standby() end)
 
-mp.register_event("file-loaded", reapply)
-mp.register_event("video-reconfig", reapply)
-mp.register_event("start-file", reapply)
-mp.register_event("vo-configured", reapply)
+mp.register_event("file-loaded", function() reapply(); hide_standby() end)
+mp.register_event("video-reconfig", function() reapply(); hide_standby() end)
+mp.register_event("start-file", function() reapply(); hide_standby() end)
+mp.register_event("vo-configured", function() reapply(); hide_standby() end)
 mp.observe_property("media-title", "string", reapply)
-mp.observe_property("window-id", "number", reapply)
-mp.observe_property("idle-active", "bool", reapply)
+mp.observe_property("window-id", "number", function() reapply(); hide_standby() end)
+mp.observe_property("idle-active", "bool", function() reapply(); hide_standby() end)
 
 -- Apply after native mpv has created its window and media title.
 for _, delay in ipairs({ 0.05, 0.15, 0.5, 1.2, 2.5 }) do
-  mp.add_timeout(delay, reapply)
+  mp.add_timeout(delay, function() reapply(); hide_standby() end)
 end

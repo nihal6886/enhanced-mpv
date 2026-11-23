@@ -2,6 +2,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const http = require("http");
 const { spawnSync } = require("child_process");
 const { encodeMessage, createFramer } = require("./protocol");
 const { fastDispatch, findMpv, attachAudio, ipcAlive, spawnMpv, appendLaunchLog, setRelayInProcess } = require("./mpv-launcher");
@@ -23,6 +24,48 @@ const CHROME_REG_KEYS = [
 function writeOut(obj) {
   const buf = encodeMessage(obj);
   fs.writeSync(1, buf);
+}
+
+function requestDaemon(endpoint, pathname, payload) {
+  return new Promise((resolve, reject) => {
+    const body = payload == null ? null : Buffer.from(JSON.stringify(payload), "utf8");
+    const req = http.request({
+      host: "127.0.0.1", port: endpoint.port, path: pathname,
+      method: body ? "POST" : "GET", timeout: 1200,
+      headers: {
+        ...(body ? { "content-type": "application/json", "content-length": body.length } : {}),
+        "x-enhanced-mpv-token": endpoint.token,
+      },
+    }, (res) => {
+      let data = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { data += chunk; });
+      res.on("end", () => {
+        let parsed = {};
+        try { parsed = data ? JSON.parse(data) : {}; } catch { /* malformed response */ }
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(parsed.error || "daemon status " + res.statusCode));
+        } else resolve(parsed);
+      });
+    });
+    req.on("timeout", () => req.destroy(new Error("daemon request timed out")));
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+async function dispatchThroughLiveDaemon(msg) {
+  const endpoint = readDaemonEndpoint();
+  if (!endpoint || !Number.isInteger(endpoint.port) || !endpoint.token) return null;
+  try {
+    await requestDaemon(endpoint, "/health");
+  } catch { return null; }
+  try {
+    return await requestDaemon(endpoint, "/dispatch", msg);
+  } catch (err) {
+    return { ok: false, error: String(err.message || err), code: "DAEMON_DISPATCH_FAILED", command: [] };
+  }
 }
 
 // Where a Native Messaging manifest for Chromium may live: next to the compiled
@@ -179,8 +222,15 @@ async function handle(msg) {
   }
   const action = msg.action || "play";
   switch (action) {
-    case "getConfig":
-      return { ok: true, error: null, code: "OK", config: readConfig(), command: [] };
+    case "getConfig": {
+      const config = readConfig();
+      const endpoint = readDaemonEndpoint();
+      if (endpoint && endpoint.port && endpoint.token) {
+        config.daemonPort = endpoint.port;
+        config.daemonToken = endpoint.token;
+      }
+      return { ok: true, error: null, code: "OK", config, command: [] };
+    }
     case "setConfig":
       return { ok: true, error: null, code: "OK", config: writeConfig(msg.config || {}), command: [] };
     case "parseFilename":
@@ -192,10 +242,10 @@ async function handle(msg) {
     case "register_id":
       return registerId(msg.extensionId);
     case "queue":
-      return fastDispatch(msg, "queue");
+      return (await dispatchThroughLiveDaemon({ ...msg, action: "queue" })) || fastDispatch(msg, "queue");
     case "play":
     case "playNow":
-      return fastDispatch(msg, "replace");
+      return (await dispatchThroughLiveDaemon({ ...msg, action: "play" })) || fastDispatch(msg, "replace");
     case "attachAudio":
       return attachAudio(msg);
     case "prewarm": {
@@ -203,7 +253,21 @@ async function handle(msg) {
       const endpoint = process.env.ENHANCED_MPV_DAEMON === "1"
         ? readDaemonEndpoint()
         : await ensureLaunchDaemon(2500);
-      return { ...warmed, endpoint };
+      if (endpoint && endpoint.port && endpoint.token) {
+        return { ok: true, port: endpoint.port, token: endpoint.token, daemon: endpoint };
+      }
+      // If prewarm succeeded but no endpoint yet, still include endpoint info if available
+      const daemonInfo = endpoint || readDaemonEndpoint();
+      return { ok: true, error: null, code: "OK", ...warmed, ...(daemonInfo ? { port: daemonInfo.port, token: daemonInfo.token, daemon: daemonInfo } : {}) };
+    }
+    case "ping": {
+      const endpoint = process.env.ENHANCED_MPV_DAEMON === "1"
+        ? readDaemonEndpoint()
+        : await ensureLaunchDaemon(2500);
+      if (endpoint && endpoint.port && endpoint.token) {
+        return { ok: true, port: endpoint.port, token: endpoint.token, daemon: endpoint };
+      }
+      return { ok: false, error: "daemon not ready", code: "DAEMON_NOT_READY" };
     }
     case "startRelay": {
       // Start localhost HLS relay for protected streams
@@ -219,11 +283,15 @@ async function handle(msg) {
       }
     }
     case "copyCommand": {
-      const result = await fastDispatch({ ...msg, action: "play" }, "replace");
+      const result = (await dispatchThroughLiveDaemon({ ...msg, action: "play" })) || await fastDispatch({ ...msg, action: "play" }, "replace");
       return result;
     }
     default:
-      if (msg.url) return fastDispatch(msg, action === "queue" ? "queue" : "replace");
+      if (msg.url) {
+        const mode = action === "queue" ? "queue" : "replace";
+        const routed = await dispatchThroughLiveDaemon({ ...msg, action: mode === "queue" ? "queue" : "play" });
+        return routed || fastDispatch(msg, mode);
+      }
       return { ok: false, error: "unknown action", code: "BAD_URL", command: [] };
   }
 }
@@ -238,14 +306,15 @@ async function prewarmMpv() {
     return { ok: true, error: null, code: "OK", warmed: false, command: [] };
   }
   if (await ipcAlive()) {
-    return { ok: true, error: null, code: "OK", warmed: true, command: [] };
+    const endpoint = readDaemonEndpoint();
+    return { ok: true, error: null, code: "OK", warmed: true, command: [], ...(endpoint ? { port: endpoint.port, token: endpoint.token, daemon: endpoint } : {}) };
   }
   const warmArgs = [
     "--idle=yes",
     "--force-window=no",
     "--input-ipc-server=" + ipcPath(),
     "--demuxer-lavf-analyzeduration=0.5",
-    "--demuxer-lavf-probesize=500000",
+    "--demuxer-lavf-probesize=262144",
     "--cache=yes",
     "--cache-secs=15",
     "--demuxer-readahead-secs=5",
@@ -395,4 +464,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { handle, writeOut, registerId, prewarmMpv };
+module.exports = { handle, writeOut, registerId, prewarmMpv, dispatchThroughLiveDaemon };

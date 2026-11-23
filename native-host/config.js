@@ -5,6 +5,9 @@ const os = require("os");
 const path = require("path");
 
 function configDir() {
+  if (process.env.ENHANCED_MPV_CONFIG_DIR) {
+    return process.env.ENHANCED_MPV_CONFIG_DIR;
+  }
   return path.join(os.homedir(), ".enhanced-mpv");
 }
 
@@ -31,17 +34,25 @@ const DEFAULTS = {
 };
 
 function ensureDir(dir) {
-  fs.mkdirSync(dir, { recursive: true });
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {
+    // Ignore permissions/sandbox directory creation errors
+  }
 }
 
 function readConfig() {
   ensureDir(configDir());
   const p = configPath();
-  if (!fs.existsSync(p)) {
-    fs.writeFileSync(p, JSON.stringify(DEFAULTS, null, 2), "utf8");
-    return { ...DEFAULTS };
-  }
   try {
+    if (!fs.existsSync(p)) {
+      try {
+        fs.writeFileSync(p, JSON.stringify(DEFAULTS, null, 2), "utf8");
+      } catch {
+        // Ignore write failures in read-only/sandboxed environments
+      }
+      return { ...DEFAULTS };
+    }
     const parsed = JSON.parse(fs.readFileSync(p, "utf8"));
     return { ...DEFAULTS, ...parsed, opensubtitles: { ...DEFAULTS.opensubtitles, ...(parsed.opensubtitles || {}) } };
   } catch {

@@ -1,3 +1,18 @@
+// Startup error logging - wrap in try/catch to log any startup failures
+try {
+  require("./config"); // Ensure config module loads first for logging
+} catch (err) {
+  const fs = require("fs");
+  const path = require("path");
+  try {
+    const logPath = path.join(process.env.USERPROFILE || "", ".enhanced-mpv", "last-launch.log");
+    const msg = "[" + new Date().toISOString() + "] STARTUP FAILED: " + String((err && err.stack) || err) + "\n";
+    fs.appendFileSync(logPath, msg, "utf8");
+  } catch {
+    // Ignore logging failures
+  }
+}
+
 "use strict";
 
 const fs = require("fs");
@@ -7,8 +22,9 @@ const crypto = require("crypto");
 const net = require("net");
 const { spawn } = require("child_process");
 const { configDir, ensureDir } = require("./config");
-const { appendLaunchLog, resolveMpvBin } = require("./mpv-launcher");
+const { appendLaunchLog, resolveMpvBin, fastDispatch } = require("./mpv-launcher");
 const { prefetchStreamSegments, getPrefetchCacheStats } = require("./stream-relay");
+const { headerFields, joinHeaderFields, sanitizeTitle } = require("./sanitizer");
 const {
   PipelineStage,
   canTransition,
@@ -27,6 +43,22 @@ let socketConnecting = false;
 const prewarmedStreams = new Map();
 let standbyMpvProcess = null;
 let isRestarting = false;
+
+let ipcReadBuffer = "";
+let ipcRequestSeq = 500000;
+const pendingIpcRequests = new Map();
+let lastVideoWidth = 0;
+let lastVideoHeight = 0;
+let coreIdle = true;
+
+// Global error handlers to prevent process exit
+process.on("uncaughtException", (err) => {
+  appendLaunchLog("[" + new Date().toISOString() + "] UNCAUGHT EXCEPTION: " + String((err && err.stack) || err));
+});
+
+process.on("unhandledRejection", (reason) => {
+  appendLaunchLog("[" + new Date().toISOString() + "] UNHANDLED REJECTION: " + String(reason));
+});
 
 // ============================================================================
 // UNIFIED PIPELINE STATE MACHINE - Single Source of Truth
@@ -81,14 +113,6 @@ function emitPipelineState() {
     relayStats: stats,
   };
   const event = createPipelineStateEvent(stateWithStats, "daemon");
-  const payload = JSON.stringify(event);
-
-  // Broadcast to all WebSocket clients
-  for (const [, client] of wsClients) {
-    if (client.alive && client.socket && client.socket.writable) {
-      sendWsFrame(client.socket, payload);
-    }
-  }
 
   // Notify internal listeners
   for (const listener of pipelineStateListeners) {
@@ -106,8 +130,11 @@ function emitPipelineState() {
 
 let preloadStartTime = 0;
 
-function startPreload(candidate, tabId, startTime) {
+async function startPreload(candidate, tabId, startTime) {
   preloadStartTime = Date.now();
+  lastVideoWidth = 0;
+  lastVideoHeight = 0;
+  coreIdle = true;
 
   updatePipelineState({
     stage: PipelineStage.PREWARMING,
@@ -119,19 +146,46 @@ function startPreload(candidate, tabId, startTime) {
   });
 
   // Trigger RAM Segment Ring prefetch
-  void prefetchStreamSegments(candidate.url, candidate.videoHeaders || {}).catch(() => {});
+  void prefetchStreamSegments(candidate.url, candidate.videoHeaders || candidate.headers || {}).catch(() => {});
+
+  try {
+    await ensureStandbyMpv();
+    await connectPersistentSocket();
+    const opts = {
+      pause: "yes",
+      start: startTime && startTime > 0 ? "+" + Math.floor(startTime) : "none",
+      "demuxer-lavf-analyzeduration": "0.5",
+      "demuxer-lavf-probesize": "262144",
+      cache: "yes",
+      "cache-secs": "15",
+      "demuxer-readahead-secs": "5",
+      "hls-bitrate": "max",
+    };
+    const headerOption = buildHeaderOption(candidate);
+    if (headerOption) opts["http-header-fields"] = headerOption;
+    const reply = await sendPersistentIpc(["loadfile", candidate.url, "replace", -1, opts], 1200);
+    appendLaunchLog(
+      "[" + new Date().toISOString() + "] preload loadfile " +
+      (reply && reply.error === "success" ? "ok" : "no-ack") + " " + candidate.url
+    );
+  } catch (err) {
+    appendLaunchLog("[" + new Date().toISOString() + "] preload failed: " + String((err && err.message) || err));
+  }
 }
 
 function markFrameReady() {
-  if (!pipelineState.frameReady) {
-    const prewarmMs = Date.now() - preloadStartTime;
-    updatePipelineState({
-      frameReady: true,
-      prewarmMs,
-      stage: PipelineStage.SHADOW_READY,
-    });
-    appendLaunchLog(`[${new Date().toISOString()}] Pipeline: SHADOW_READY achieved in ${prewarmMs}ms`);
-  }
+  if (pipelineState.frameReady) return;
+  const prewarmMs = preloadStartTime ? Date.now() - preloadStartTime : 0;
+  const earlyStage =
+    pipelineState.stage === PipelineStage.SNIFFING ||
+    pipelineState.stage === PipelineStage.PROBING ||
+    pipelineState.stage === PipelineStage.PREWARMING;
+  updatePipelineState({
+    frameReady: true,
+    prewarmMs: prewarmMs || pipelineState.prewarmMs || 0,
+    ...(earlyStage ? { stage: PipelineStage.SHADOW_READY } : {}),
+  });
+  appendLaunchLog(`[${new Date().toISOString()}] Pipeline: frame ready in ${prewarmMs}ms`);
 }
 
 function canZeroWaitLaunch(candidateId, tabId) {
@@ -139,52 +193,58 @@ function canZeroWaitLaunch(candidateId, tabId) {
          pipelineState.candidate &&
          pipelineState.candidate.id === candidateId &&
          pipelineState.tabId === tabId &&
+         !pipelineState.candidate.audioUrl &&
          pipelineState.stage === PipelineStage.SHADOW_READY;
 }
 
-async function executeZeroWaitLaunch(startTime) {
+async function executeZeroWaitLaunch(startTime, title) {
   const launchStart = Date.now();
-  
+
   await connectPersistentSocket();
   if (!persistentSocket || persistentSocket.destroyed || !persistentSocket.writable) {
     return false;
   }
 
-  const flushCommands = [
+  const commands = [
+    ["set_property", "window-minimized", "no"],
+    ["set_property", "ontop", true],
+    ["script-message", "enhanced-mpv-loading", title || "Enhanced MPV"],
+    ["script-message", "enhanced-mpv-focus"],
     ["seek", startTime && startTime > 0 ? startTime : 0, "absolute+exact"],
     ["set_property", "pause", false],
-    ["set_property", "force-window", "yes"],
-    ["script-message", "enhanced-mpv-focus"],
   ];
 
-  const flushed = flushIpcCommands(flushCommands);
-  if (flushed) {
-    const launchMs = Date.now() - launchStart;
-    updatePipelineState({
-      stage: PipelineStage.LAUNCHING,
-      launchMs,
-    });
-    // Quick transition to PLAYING after launch
-    setTimeout(() => {
-      if (pipelineState.stage === PipelineStage.LAUNCHING) {
-        setPipelineStage(PipelineStage.PLAYING);
-      }
-    }, 50);
-    appendLaunchLog(`[${new Date().toISOString()}] Zero-Wait HOT PATH: launch in ${launchMs}ms`);
-    return true;
+  for (const cmd of commands) {
+    const reply = await sendPersistentIpc(cmd, 300);
+    if (!reply || reply.error !== "success") {
+      appendLaunchLog("[" + new Date().toISOString() + "] hot path IPC failed on " + cmd[0]);
+      return false;
+    }
   }
-  return false;
+
+  setTimeout(() => {
+    void sendPersistentIpc(["set_property", "ontop", false], 150).catch(() => {});
+  }, 500);
+
+  const launchMs = Date.now() - launchStart;
+  updatePipelineState({
+    stage: PipelineStage.LAUNCHING,
+    launchMs,
+  });
+  setTimeout(() => {
+    if (pipelineState.stage === PipelineStage.LAUNCHING) {
+      setPipelineStage(PipelineStage.PLAYING);
+    }
+  }, 50);
+  appendLaunchLog(`[${new Date().toISOString()}] Zero-Wait HOT PATH: launch in ${launchMs}ms`);
+  return true;
 }
 
 async function executeColdLaunch(candidate, startTime, title) {
   const launchStart = Date.now();
-  
+
   await ensureStandbyMpv();
   await connectPersistentSocket();
-  if (!persistentSocket || persistentSocket.destroyed || !persistentSocket.writable) {
-    return false;
-  }
-
   updatePipelineState({
     stage: PipelineStage.LAUNCHING,
     candidate,
@@ -192,40 +252,98 @@ async function executeColdLaunch(candidate, startTime, title) {
 
   const opts = {
     start: startTime && startTime > 0 ? String(startTime) : "none",
-    "demuxer-lavf-analyzeduration": "0.15",
-    "demuxer-lavf-probesize": "65536",
+    "demuxer-lavf-analyzeduration": "0.5",
+    "demuxer-lavf-probesize": "262144",
     cache: "yes",
+    "cache-secs": "15",
     "demuxer-readahead-secs": "5",
     "hls-bitrate": "max",
+    "cache-pause-initial": "no",
+    "initial-audio-sync": "no",
   };
+  const headerOption = buildHeaderOption(candidate);
+  if (headerOption) opts["http-header-fields"] = headerOption;
+
+  // A standby process is useful only when mpv has created its native window.
+  // Give the IPC pipe 200 ms to report the HWND before taking the visible
+  // launcher fallback path.
+  let windowReady = false;
+  const windowDeadline = Date.now() + 200;
+  while (Date.now() < windowDeadline) {
+    const windowReply = await sendPersistentIpc(["get_property", "window-id"], 60).catch(() => null);
+    if (windowReply && windowReply.error === "success" && Number(windowReply.data) !== 0) {
+      windowReady = true;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 15));
+  }
 
   const ipcCommands = [
     ["set_property", "force-window", "yes"],
-    ["script-message", "enhanced-mpv-focus"],
+    ["set_property", "window-minimized", "no"],
+    ["set_property", "ontop", true],
     ["script-message", "enhanced-mpv-loading", title || candidate.title || "Enhanced MPV"],
+    ["script-message", "enhanced-mpv-focus"],
     ["loadfile", candidate.url, "replace", -1, opts],
   ];
 
-  const flushed = flushIpcCommands(ipcCommands);
-  if (flushed) {
+  let acked = windowReady;
+  if (!windowReady) {
+    appendLaunchLog("[" + new Date().toISOString() + "] standby window-id unavailable within 200ms");
+  }
+  for (const cmd of ipcCommands) {
+    const reply = await sendPersistentIpc(cmd, cmd[0] === "loadfile" ? 1200 : 250);
+    if (!reply || reply.error !== "success") {
+      acked = false;
+      appendLaunchLog("[" + new Date().toISOString() + "] cold launch IPC failed on " + cmd[0]);
+      break;
+    }
+  }
+
+  if (acked) {
+    setTimeout(() => {
+      void sendPersistentIpc(["set_property", "ontop", false], 150).catch(() => {});
+    }, 500);
     const launchMs = Date.now() - launchStart;
     updatePipelineState({ launchMs });
     appendLaunchLog(`[${new Date().toISOString()}] Cold launch dispatched in ${launchMs}ms`);
     return true;
   }
-  return false;
+
+  // Fallback: spawn / reuse a visible enhanced-mpv.exe through the launcher,
+  // which opens the window with --force-window=immediate even when the
+  // daemon's persistent socket is stale.
+  appendLaunchLog("[" + new Date().toISOString() + "] cold launch falling back to visible spawn");
+  const fallback = await fastDispatch({
+    url: candidate.url,
+    title: candidate.title || title || "Enhanced MPV",
+    headers: candidate.videoHeaders || candidate.headers || {},
+    audioUrl: candidate.audioUrl,
+    audioHeaders: candidate.audioHeaders,
+    startTime: startTime || 0,
+    candidates: [candidate],
+    qualities: pipelineState.qualities || [],
+    action: "play",
+  }, "replace");
+  const launchMs = Date.now() - launchStart;
+  updatePipelineState({ launchMs });
+  return Boolean(fallback && fallback.ok);
 }
 
 // ============================================================================
-// WebSocket server state
+// IPC observed properties
 // ============================================================================
 
-const wsClients = new Map(); // clientId -> { socket, tabId, lastPing, alive }
-let wsClientIdCounter = 0;
 const MPV_OBSERVED_PROPS = [
-  "time-pos", "pause", "width", "height", 
-  "demuxer-cache-duration", "media-title", "path", "duration"
+  "time-pos", "pause", "width", "height",
+  "demuxer-cache-duration", "media-title", "path", "duration",
+  "video-out-params", "core-idle",
 ];
+
+function buildHeaderOption(candidate) {
+  const parts = headerFields({ headers: candidate.videoHeaders || candidate.headers || {} });
+  return parts.length ? joinHeaderFields(parts) : "";
+}
 
 // ============================================================================
 // Daemon endpoint management
@@ -248,6 +366,15 @@ function readDaemonEndpoint() {
 
 function writeDaemonEndpoint(endpoint) {
   ensureDir(configDir());
+  try {
+    for (const entry of fs.readdirSync(configDir())) {
+      if (/^daemon\.json\..*\.tmp$/.test(entry)) {
+        try { fs.unlinkSync(path.join(configDir(), entry)); } catch { /* ignore */ }
+      }
+    }
+  } catch {
+    // Directory may not exist yet; ensureDir above handles that.
+  }
   const target = endpointPath();
   const tmp = target + "." + process.pid + ".tmp";
   fs.writeFileSync(tmp, JSON.stringify(endpoint), { encoding: "utf8", mode: 0o600 });
@@ -274,47 +401,78 @@ function logError(message) {
 // Persistent IPC Socket
 // ============================================================================
 
+function resetIpcState() {
+  ipcReadBuffer = "";
+  for (const entry of pendingIpcRequests.values()) {
+    if (entry.timer) clearTimeout(entry.timer);
+    entry.resolve(null);
+  }
+  pendingIpcRequests.clear();
+}
+
 function connectPersistentSocket() {
   if (socketConnecting || (persistentSocket && persistentSocket.writable && !persistentSocket.destroyed)) {
     return Promise.resolve(persistentSocket);
   }
   socketConnecting = true;
-  return new Promise((resolve, reject) => {
-    const sock = net.connect(IPC_PIPE_PATH);
+  return new Promise((resolve) => {
+    let settled = false;
+    let connectGuard = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (connectGuard) clearTimeout(connectGuard);
+      resolve(value);
+    };
+    let sock;
+    try {
+      sock = net.connect(IPC_PIPE_PATH);
+    } catch (err) {
+      socketConnecting = false;
+      appendLaunchLog("[" + new Date().toISOString() + "] persistent IPC connect threw: " + String(err));
+      scheduleSocketReconnect();
+      finish(null);
+      return;
+    }
     sock.setNoDelay(true);
+    connectGuard = setTimeout(() => {
+      if (persistentSocket !== sock) {
+        socketConnecting = false;
+        try { sock.destroy(); } catch { /* ignore */ }
+        scheduleSocketReconnect();
+        finish(null);
+      }
+    }, 1500);
     sock.on("connect", () => {
       socketConnecting = false;
       persistentSocket = sock;
+      resetIpcState();
       if (socketReconnectTimer) {
         clearTimeout(socketReconnectTimer);
         socketReconnectTimer = null;
       }
       appendLaunchLog("[" + new Date().toISOString() + "] persistent IPC socket connected");
       subscribeToMpvProperties();
-      resolve(sock);
+      finish(sock);
     });
     sock.on("error", (err) => {
       socketConnecting = false;
-      if (err.code === "ECONNREFUSED" || err.code === "ENOENT" || err.code === "EPIPE") {
-        scheduleSocketReconnect();
-        resolve(null);
-      } else {
-        reject(err);
-      }
+      if (persistentSocket === sock) persistentSocket = null;
+      appendLaunchLog("[" + new Date().toISOString() + "] persistent IPC socket error: " +
+        String((err && (err.code || err.message)) || err));
+      scheduleSocketReconnect();
+      finish(null);
     });
     sock.on("close", () => {
       if (persistentSocket === sock) {
         persistentSocket = null;
+        resetIpcState();
         scheduleSocketReconnect();
       }
     });
     sock.on("data", handleMpvIpcResponse);
-    sock.setTimeout(1000, () => {
-      sock.destroy();
-      socketConnecting = false;
-      scheduleSocketReconnect();
-      resolve(null);
-    });
+    // No idle timeout: the socket must stay open so observe_property
+    // subscriptions survive between launches.
   });
 }
 
@@ -323,7 +481,7 @@ function scheduleSocketReconnect() {
   socketReconnectTimer = setTimeout(() => {
     socketReconnectTimer = null;
     connectPersistentSocket().catch(() => {});
-  }, 500);
+  }, 750);
 }
 
 function flushIpcCommands(commands) {
@@ -331,7 +489,9 @@ function flushIpcCommands(commands) {
   if (!sock || sock.destroyed || !sock.writable) return false;
   try {
     for (const cmd of commands) {
-      sock.write(JSON.stringify(cmd) + "\n");
+      // mpv IPC requires every command to be wrapped in a {"command": [...]}
+      // envelope. A bare JSON array is parsed as an event and ignored.
+      sock.write(JSON.stringify({ command: cmd }) + "\n");
     }
     return true;
   } catch {
@@ -339,212 +499,82 @@ function flushIpcCommands(commands) {
   }
 }
 
+function sendPersistentIpc(command, timeoutMs) {
+  const sock = persistentSocket;
+  if (!sock || sock.destroyed || !sock.writable) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const requestId = 1000 + (++ipcRequestSeq % 1000000);
+    const entry = {
+      timer: null,
+      resolve: (value) => {
+        if (entry.timer) clearTimeout(entry.timer);
+        pendingIpcRequests.delete(requestId);
+        resolve(value);
+      },
+    };
+    entry.timer = setTimeout(() => entry.resolve(null), Math.max(50, timeoutMs || 250));
+    pendingIpcRequests.set(requestId, entry);
+    try {
+      sock.write(JSON.stringify({ command, request_id: requestId }) + "\n");
+    } catch {
+      entry.resolve(null);
+    }
+  });
+}
+
 function subscribeToMpvProperties() {
-  if (!persistentSocket || persistentSocket.destroyed || !persistentSocket.writable) return;
-  for (const prop of MPV_OBSERVED_PROPS) {
-    const cmd = ["observe_property", 1000 + MPV_OBSERVED_PROPS.indexOf(prop), prop];
-    persistentSocket.write(JSON.stringify(cmd) + "\n");
+  const sock = persistentSocket;
+  if (!sock || sock.destroyed || !sock.writable) return;
+  MPV_OBSERVED_PROPS.forEach((prop, index) => {
+    try {
+      sock.write(JSON.stringify({ command: ["observe_property", 1000 + index, prop] }) + "\n");
+    } catch {
+      // Ignore individual subscription failures.
+    }
+  });
+}
+
+function maybeMarkFrameReady() {
+  if (lastVideoWidth > 0 && lastVideoHeight > 0 && coreIdle !== true) {
+    markFrameReady();
   }
 }
 
 function handleMpvIpcResponse(data) {
-  try {
-    const lines = data.toString().trim().split("\n");
-    for (const line of lines) {
-      if (!line) continue;
-      const msg = JSON.parse(line);
-      if (msg.event === "property-change" && msg.name) {
-        // Update pipeline state with mpv telemetry
-        if (msg.name === "video-out-params" && msg.data && typeof msg.data === "object") {
-          const width = msg.data.w || msg.data.width || 0;
-          const height = msg.data.h || msg.data.height || 0;
-          if (width > 0 && height > 0) {
-            markFrameReady();
-          }
-        }
-        // Broadcast to WS clients
-        broadcastPlayerTelemetry(msg.name, msg.data);
-      }
+  ipcReadBuffer += data.toString("utf8");
+  let newlineIndex;
+  while ((newlineIndex = ipcReadBuffer.indexOf("\n")) >= 0) {
+    const line = ipcReadBuffer.slice(0, newlineIndex).trim();
+    ipcReadBuffer = ipcReadBuffer.slice(newlineIndex + 1);
+    if (!line) continue;
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      continue;
     }
-  } catch {
-    // Ignore parse errors
-  }
-}
-
-function broadcastPlayerTelemetry(propName, value) {
-  const stateUpdate = { type: "player:state", state: { [propName]: value, timestamp: Date.now() } };
-  const payload = JSON.stringify(stateUpdate);
-  for (const [, client] of wsClients) {
-    if (client.alive && client.socket && client.socket.writable) {
-      sendWsFrame(client.socket, payload);
+    if (msg.request_id != null && pendingIpcRequests.has(msg.request_id)) {
+      const entry = pendingIpcRequests.get(msg.request_id);
+      pendingIpcRequests.delete(msg.request_id);
+      if (entry.timer) clearTimeout(entry.timer);
+      entry.resolve(msg);
+      continue;
+    }
+    if (msg.event !== "property-change" || !msg.name) continue;
+    if (msg.name === "video-out-params" && msg.data && typeof msg.data === "object") {
+      lastVideoWidth = Number(msg.data.w || msg.data.width || 0) || 0;
+      lastVideoHeight = Number(msg.data.h || msg.data.height || 0) || 0;
+      maybeMarkFrameReady();
+    } else if (msg.name === "core-idle") {
+      coreIdle = msg.data === true;
+      maybeMarkFrameReady();
     }
   }
 }
 
 // ============================================================================
-// WebSocket frame handling (RFC 6455)
+// IPC Command Helpers (no WebSocket)
 // ============================================================================
-
-const WS_OPCODE_TEXT = 0x1;
-const WS_OPCODE_CLOSE = 0x8;
-const WS_OPCODE_PING = 0x9;
-const WS_OPCODE_PONG = 0xA;
-
-function sendWsFrame(socket, payload) {
-  if (!socket || socket.destroyed || !socket.writable) return false;
-  try {
-    const data = Buffer.from(payload, "utf8");
-    const frame = Buffer.alloc(2 + data.length);
-    frame[0] = 0x80 | WS_OPCODE_TEXT;
-    frame[1] = data.length < 126 ? data.length : (data.length < 65536 ? 126 : 127);
-    let offset = 2;
-    if (data.length >= 126 && data.length < 65536) {
-      frame.writeUInt16BE(data.length, 2);
-      offset = 4;
-    } else if (data.length >= 65536) {
-      frame.writeUInt32BE(0, 2);
-      frame.writeUInt32BE(data.length, 6);
-      offset = 10;
-    }
-    data.copy(frame, offset);
-    socket.write(frame);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function sendWsClose(socket, code = 1000) {
-  if (!socket || socket.destroyed) return;
-  try {
-    const frame = Buffer.alloc(4);
-    frame[0] = 0x80 | WS_OPCODE_CLOSE;
-    frame[1] = 2;
-    frame.writeUInt16BE(code, 2);
-    socket.write(frame);
-    socket.end();
-  } catch { /* ignore */ }
-}
-
-function parseWsFrames(buffer, clients, clientId) {
-  let offset = 0;
-  while (offset < buffer.length) {
-    if (buffer.length - offset < 2) break;
-    const opcode = buffer[offset] & 0x0F;
-    const masked = (buffer[offset + 1] & 0x80) !== 0;
-    let payloadLen = buffer[offset + 1] & 0x7F;
-    let headerLen = 2;
-    
-    if (payloadLen === 126) {
-      if (buffer.length - offset < 4) break;
-      payloadLen = buffer.readUInt16BE(offset + 2);
-      headerLen = 4;
-    } else if (payloadLen === 127) {
-      if (buffer.length - offset < 10) break;
-      payloadLen = buffer.readUInt32BE(offset + 6);
-      headerLen = 10;
-    }
-    
-    if (buffer.length - offset < headerLen + (masked ? 4 : 0) + payloadLen) break;
-    
-    let maskOffset = headerLen;
-    if (masked) {
-      const mask = buffer.slice(maskOffset, maskOffset + 4);
-      maskOffset += 4;
-      const payload = buffer.slice(maskOffset, maskOffset + payloadLen);
-      const unmasked = Buffer.alloc(payloadLen);
-      for (let i = 0; i < payloadLen; i++) {
-        unmasked[i] = payload[i] ^ mask[i % 4];
-      }
-      handleWsMessage(clients.get(clientId), unmasked.toString("utf8"), opcode);
-    } else {
-      const payload = buffer.slice(maskOffset, maskOffset + payloadLen);
-      handleWsMessage(clients.get(clientId), payload.toString("utf8"), opcode);
-    }
-    
-    offset += headerLen + (masked ? 4 : 0) + payloadLen;
-  }
-  return buffer.slice(offset);
-}
-
-function handleWsMessage(client, message, opcode) {
-  if (opcode === WS_OPCODE_CLOSE) {
-    client.alive = false;
-    return;
-  }
-  if (opcode === WS_OPCODE_PING) {
-    const frame = Buffer.alloc(2);
-    frame[0] = 0x80 | WS_OPCODE_PONG;
-    frame[1] = 0;
-    client.socket.write(frame);
-    return;
-  }
-  if (opcode === WS_OPCODE_PONG) {
-    client.lastPing = Date.now();
-    return;
-  }
-  if (opcode !== WS_OPCODE_TEXT) return;
-  
-  try {
-    const msg = JSON.parse(message);
-    handleWsClientMessage(client, msg);
-  } catch {
-    // Ignore invalid JSON
-  }
-}
-
-function handleWsClientMessage(client, msg) {
-  switch (msg.type) {
-    case "extension:register":
-      client.tabId = msg.tabId;
-      client.role = "extension";
-      appendLaunchLog("[" + new Date().toISOString() + "] WS client registered: tabId=" + msg.tabId);
-      // Send current pipeline state
-      sendWsFrame(client.socket, JSON.stringify(createPipelineStateEvent(pipelineState, "daemon")));
-      break;
-    case "extension:heartbeat":
-      client.lastPing = Date.now();
-      break;
-    case "extension:candidates-update":
-      // Update pipeline state with new candidates
-      if (msg.candidates && msg.candidates.length) {
-        updatePipelineState({
-          candidates: msg.candidates,
-          qualities: msg.qualities || [],
-          tabId: msg.tabId,
-        });
-        
-        // If we're in SNIFFING/PROBING and have a verified top candidate, advance
-        if (pipelineState.stage === PipelineStage.SNIFFING || pipelineState.stage === PipelineStage.PROBING) {
-          const topCandidate = msg.candidates[0];
-          if (topCandidate && topCandidate.verified) {
-            setPipelineStage(PipelineStage.PROBING, { candidate: topCandidate, tabId: msg.tabId });
-            // Trigger preload for verified candidate
-            startPreload(topCandidate, msg.tabId, 0);
-          }
-        }
-      }
-      // Forward to mpv via IPC for menu updates
-      updateMpvSources(msg.tabId, msg.candidates, msg.qualities);
-      cacheCandidatesForTab(msg.tabId, msg.candidates, msg.qualities);
-      break;
-    case "extension:play":
-      handlePlayRequest(msg);
-      break;
-    case "extension:seek":
-      sendSeekCommand(msg.timePos);
-      break;
-    case "extension:pause":
-      sendPauseCommand(msg.paused);
-      break;
-    case "extension:switch-quality":
-      switchMpvQuality(msg.index);
-      break;
-    case "pipeline:getState":
-      sendWsFrame(client.socket, JSON.stringify(createPipelineStateEvent(pipelineState, "daemon")));
-      break;
-  }
-}
 
 function updateMpvSources(tabId, candidates, qualities) {
   const payload = {
@@ -562,69 +592,12 @@ function cacheCandidatesForTab(tabId, candidates, qualities) {
   global.cachedCandidatesByTab.set(tabId, { candidates, qualities, updatedAt: Date.now() });
 }
 
-function handlePlayRequest(msg) {
-  const { handle } = require("./index");
-  handle({
-    action: "play",
-    url: msg.url,
-    title: msg.title,
-    referer: msg.referer,
-    userAgent: msg.userAgent,
-    cookies: msg.cookies,
-    headers: msg.headers,
-    audioUrl: msg.audioUrl,
-    audioHeaders: msg.audioHeaders,
-    startTime: msg.startTime,
-    candidates: msg.candidates,
-    qualities: msg.qualities
-  }).catch(err => logError("WS play request failed: " + err.message));
-}
-
-function sendSeekCommand(timePos) {
-  flushIpcCommands([["seek", timePos, "absolute"]]);
-  updatePipelineState({ lastSeekTime: timePos });
-}
-
-function sendPauseCommand(paused) {
-  flushIpcCommands([["set_property", "pause", paused]]);
-  updatePipelineState({ paused });
-}
-
-function switchMpvQuality(index) {
-  flushIpcCommands([["script-message", "stream-controller-switch", String(index)]]);
-}
-
-// Heartbeat interval for WS clients
-setInterval(() => {
-  const now = Date.now();
-  for (const [clientId, client] of wsClients) {
-    if (!client.alive || !client.socket || client.socket.destroyed) {
-      wsClients.delete(clientId);
-      continue;
-    }
-    const frame = Buffer.alloc(2);
-    frame[0] = 0x80 | WS_OPCODE_PING;
-    frame[1] = 0;
-    try {
-      client.socket.write(frame);
-    } catch {
-      client.alive = false;
-      wsClients.delete(clientId);
-    }
-    if (client.lastPing && now - client.lastPing > 30000) {
-      client.alive = false;
-      wsClients.delete(clientId);
-    }
-  }
-}, 10000);
-
 function isHealthy(endpoint) {
   return new Promise((resolve) => {
     const request = http.get({
       host: "127.0.0.1",
       port: endpoint.port,
       path: "/health",
-      headers: { "x-enhanced-mpv-token": endpoint.token },
     }, (response) => {
       response.resume();
       resolve(response.statusCode === 200);
@@ -649,10 +622,12 @@ async function spawnStandbyMpv() {
   }
   const args = [
     "--idle=yes",
-    "--force-window=no",
+    "--force-window=yes",
+    "--window-minimized=yes",
+    "--no-terminal",
     "--input-ipc-server=" + IPC_PIPE_PATH,
     "--demuxer-lavf-analyzeduration=0.5",
-    "--demuxer-lavf-probesize=500000",
+    "--demuxer-lavf-probesize=262144",
     "--cache=yes",
     "--cache-secs=15",
     "--demuxer-readahead-secs=5",
@@ -715,34 +690,153 @@ function killStandbyMpv() {
 }
 
 // ============================================================================
-// HTTP Server + WebSocket Upgrade
+// Launch payload normalization / dispatch
 // ============================================================================
+
+function normalizePlayPayload(raw) {
+  const input = raw && typeof raw === "object" ? raw : {};
+  const headers = input.headers && typeof input.headers === "object" ? input.headers : {};
+  const videoHeaders = input.videoHeaders && typeof input.videoHeaders === "object" ? input.videoHeaders : {};
+  const mergedHeaders = { ...headers, ...videoHeaders };
+  const startTime = Number(input.startTime ?? input.timePos ?? input.currentTime ?? 0) || 0;
+  return {
+    ...input,
+    url: input.url || input.pageUrl || input.videoUrl || input.src || "",
+    title: sanitizeTitle(input.title || input.pageTitle || ""),
+    headers: mergedHeaders,
+    videoHeaders: mergedHeaders,
+    audioUrl: input.audioUrl || null,
+    audioHeaders: input.audioHeaders || {},
+    startTime,
+    duration: Number(input.duration ?? 0) || 0,
+    action: input.action || "play",
+    candidates: Array.isArray(input.candidates) ? input.candidates : [],
+    qualities: Array.isArray(input.qualities) ? input.qualities : [],
+  };
+}
+
+async function dispatchPlay(rawPayload) {
+  const payload = normalizePlayPayload(rawPayload);
+  if (!payload.url) {
+    return { status: 400, body: { ok: false, error: "url required", code: "BAD_REQUEST" } };
+  }
+
+  if (payload.action === "queue") {
+    const queued = await fastDispatch(payload, "queue");
+    return { status: 200, body: queued };
+  }
+
+  const prewarmed = prewarmedStreams.get(payload.url);
+  if (prewarmed) {
+    payload.videoHeaders = { ...prewarmed.videoHeaders, ...payload.videoHeaders };
+    payload.headers = { ...payload.videoHeaders };
+    if (!payload.audioUrl && prewarmed.audioUrl) payload.audioUrl = prewarmed.audioUrl;
+    if ((!payload.audioHeaders || !Object.keys(payload.audioHeaders).length) && prewarmed.audioHeaders) {
+      payload.audioHeaders = prewarmed.audioHeaders;
+    }
+    if (!payload.title && prewarmed.title) payload.title = prewarmed.title;
+    prewarmedStreams.delete(payload.url);
+  }
+
+  const candidateId = payload.candidateId || payload.url;
+  const tabId = payload.tabId || 0;
+  const startTime = payload.startTime || 0;
+
+  if (canZeroWaitLaunch(candidateId, tabId)) {
+    const zeroWaitOk = await executeZeroWaitLaunch(startTime, payload.title || pipelineState.candidate.title);
+    if (zeroWaitOk) {
+      appendLaunchLog("[" + new Date().toISOString() + "] Zero-Wait HOT PATH launch for " + payload.url);
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          fast: true,
+          zeroWait: true,
+          persistentSocket: true,
+          pipelineStage: PipelineStage.PLAYING,
+        },
+      };
+    }
+  }
+
+  const candidate = {
+    id: candidateId,
+    url: payload.url,
+    title: payload.title || "Enhanced MPV",
+    audioUrl: payload.audioUrl,
+    audioHeaders: payload.audioHeaders,
+    videoHeaders: payload.videoHeaders,
+  };
+
+  const coldOk = await executeColdLaunch(candidate, startTime, payload.title);
+  if (coldOk) {
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        fast: true,
+        persistentSocket: true,
+        pipelineStage: pipelineState.stage,
+      },
+    };
+  }
+
+  const result = await fastDispatch(payload, "replace");
+  return { status: 200, body: result };
+}
+
+// ============================================================================
+// HTTP Server (stateless loopback HTTP)
+// ============================================================================
+
+const FIXED_DAEMON_PORT = 0;
 
 async function startLaunchDaemon(options) {
   if (activeServer) return activeServer;
   const opts = options || {};
   const token = crypto.randomBytes(24).toString("hex");
   process.env.ENHANCED_MPV_DAEMON = "1";
-  
+
+  // Use ephemeral port (0 = OS-assigned)
+  const preferredPort = opts.fixedPort === false ? 0 : FIXED_DAEMON_PORT;
+
   const server = http.createServer((req, res) => {
-    if (req.headers.upgrade && req.headers.upgrade.toLowerCase() === "websocket") {
-      handleWebSocketUpgrade(req, res, server);
+    // Allow /health without token for health checks
+    if (req.method === "GET" && req.url === "/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        ok: true,
+        pid: process.pid,
+        pipelineStage: pipelineState.stage,
+      }));
       return;
     }
-    
+
+    // Authenticated /state endpoint - returns full PipelineState
+    if (req.method === "GET" && req.url === "/state") {
+      if (!tokenMatches(req.headers["x-enhanced-mpv-token"], token)) {
+        res.writeHead(401);
+        res.end();
+        return;
+      }
+      const stats = getPrefetchCacheStats();
+      const stateWithStats = {
+        ...pipelineState,
+        relayStats: stats,
+      };
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        ok: true,
+        payload: stateWithStats,
+        source: "daemon",
+        timestamp: Date.now(),
+      }));
+      return;
+    }
+
     if (!tokenMatches(req.headers["x-enhanced-mpv-token"], token)) {
       res.writeHead(401);
       res.end();
-      return;
-    }
-    if (req.method === "GET" && req.url === "/health") {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ 
-        ok: true, 
-        pid: process.pid, 
-        wsClients: wsClients.size,
-        pipelineStage: pipelineState.stage,
-      }));
       return;
     }
     if (req.method === "POST" && req.url === "/prewarm-stream") {
@@ -771,18 +865,18 @@ async function startLaunchDaemon(options) {
             });
             appendLaunchLog("[" + new Date().toISOString() + "] prewarmed stream: " + videoUrl);
           }
-          
+
           // Trigger RAM Segment Ring prefetch
           void prefetchStreamSegments(videoUrl, videoHeaders || {}).catch(() => {});
-          
+
           // If verified candidate, start preload pipeline
           if (verified && candidateId && tabId) {
             await ensureStandbyMpv();
-            const candidate = { 
-              id: candidateId, 
-              url: videoUrl, 
-              title: title || "", 
-              audioUrl, 
+            const candidate = {
+              id: candidateId,
+              url: videoUrl,
+              title: title || "",
+              audioUrl,
               audioHeaders,
               videoHeaders: videoHeaders || {},
             };
@@ -796,7 +890,7 @@ async function startLaunchDaemon(options) {
               setPipelineStage(PipelineStage.SNIFFING, { tabId });
             }
           }
-          
+
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ ok: true, prewarmed: true, pipelineStage: pipelineState.stage }));
         } catch (err) {
@@ -816,52 +910,61 @@ async function startLaunchDaemon(options) {
         try {
           const payload = JSON.parse(body);
           const { handle } = require("./index");
-          
+
           if (payload.action === "play" || payload.action === "queue") {
-            const prewarmed = prewarmedStreams.get(payload.url);
-            if (prewarmed) {
-              payload.videoHeaders = { ...prewarmed.videoHeaders, ...(payload.videoHeaders || {}) };
-              if (!payload.audioUrl && prewarmed.audioUrl) payload.audioUrl = prewarmed.audioUrl;
-              if (!payload.audioHeaders && prewarmed.audioHeaders) payload.audioHeaders = prewarmed.audioHeaders;
-              if (!payload.title && prewarmed.title) payload.title = prewarmed.title;
-              prewarmedStreams.delete(payload.url);
-            }
-            
-            const candidateId = payload.candidateId || payload.url;
-            const tabId = payload.tabId || 0;
-            const startTime = payload.startTime || 0;
-            
-            // Check for Zero-Wait hot path
-            if (canZeroWaitLaunch(candidateId, tabId)) {
-              await ensureStandbyMpv();
-              const zeroWaitOk = await executeZeroWaitLaunch(startTime);
-              if (zeroWaitOk) {
-                setImmediate(() => appendLaunchLog("[" + new Date().toISOString() + "] Zero-Wait HOT PATH launch for " + payload.url));
-                res.writeHead(200, { "content-type": "application/json" });
-                res.end(JSON.stringify({ ok: true, fast: true, zeroWait: true, persistentSocket: true, pipelineStage: PipelineStage.PLAYING }));
-                return;
+            const out = await dispatchPlay(payload);
+            res.writeHead(out.status, { "content-type": "application/json" });
+            res.end(JSON.stringify(out.body));
+            return;
+          }
+
+          // Handle other dispatch types (seek, pause, switch-quality, candidates-update)
+          if (payload.type === "extension:seek") {
+            flushIpcCommands([["seek", payload.timePos, "absolute"]]);
+            updatePipelineState({ lastSeekTime: payload.timePos });
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          if (payload.type === "extension:pause") {
+            flushIpcCommands([["set_property", "pause", payload.paused]]);
+            updatePipelineState({ paused: payload.paused });
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          if (payload.type === "extension:switch-quality") {
+            flushIpcCommands([["script-message", "stream-controller-switch", String(payload.index)]]);
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          if (payload.type === "extension:candidates-update") {
+            if (payload.candidates && payload.candidates.length) {
+              updatePipelineState({
+                candidates: payload.candidates,
+                qualities: payload.qualities || [],
+                tabId: payload.tabId,
+              });
+
+              // If we're in SNIFFING/PROBING and have a verified top candidate, advance
+              if (pipelineState.stage === PipelineStage.SNIFFING || pipelineState.stage === PipelineStage.PROBING) {
+                const topCandidate = payload.candidates[0];
+                if (topCandidate && topCandidate.verified) {
+                  setPipelineStage(PipelineStage.PROBING, { candidate: topCandidate, tabId: payload.tabId });
+                  // Trigger preload for verified candidate
+                  startPreload(topCandidate, payload.tabId, 0);
+                }
               }
             }
-            
-            // Cold launch path
-            await ensureStandbyMpv();
-            const candidate = { 
-              id: candidateId, 
-              url: payload.url, 
-              title: payload.title || "Enhanced MPV",
-              audioUrl: payload.audioUrl,
-              audioHeaders: payload.audioHeaders,
-              videoHeaders: payload.headers,
-            };
-            
-            const coldOk = await executeColdLaunch(candidate, startTime, payload.title);
-            if (coldOk) {
-              res.writeHead(200, { "content-type": "application/json" });
-              res.end(JSON.stringify({ ok: true, fast: true, persistentSocket: true, pipelineStage: PipelineStage.LAUNCHING }));
-              return;
-            }
+            // Forward to mpv via IPC for menu updates
+            updateMpvSources(payload.tabId, payload.candidates, payload.qualities);
+            cacheCandidatesForTab(payload.tabId, payload.candidates, payload.qualities);
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ ok: true }));
+            return;
           }
-          
+
           const result = await handle(payload);
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify(result === undefined ? { ok: true } : result));
@@ -874,6 +977,28 @@ async function startLaunchDaemon(options) {
       });
       return;
     }
+    if (req.method === "POST" && req.url === "/play") {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk.toString("utf8");
+        if (body.length > 1024 * 1024) req.destroy();
+      });
+      req.on("end", async () => {
+        try {
+          const payload = JSON.parse(body);
+          payload.action = "play";
+          const out = await dispatchPlay(payload);
+          res.writeHead(out.status, { "content-type": "application/json" });
+          res.end(JSON.stringify(out.body));
+        } catch (err) {
+          const message = String((err && err.message) || err);
+          logError("play failed: " + message);
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: message, code: "DAEMON_PLAY_FAILED" }));
+        }
+      });
+      return;
+    }
     if (req.method === "GET" && req.url === "/pipeline-state") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(pipelineState));
@@ -882,33 +1007,33 @@ async function startLaunchDaemon(options) {
     res.writeHead(404);
     res.end();
   });
-  
-  server.on("upgrade", (req, socket, head) => {
-    handleWebSocketUpgrade(req, socket, head);
-  });
-  
+
   server.on("clientError", (err, socket) => {
     try { socket.end(); } catch { /* socket gone */ }
   });
-  
+
   await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(opts.port || 0, "127.0.0.1", resolve);
+    server.once("error", (err) => {
+      // If fixed port fails, try ephemeral
+      if (preferredPort !== 0 && err.code === "EADDRINUSE") {
+        appendLaunchLog("[" + new Date().toISOString() + "] Fixed port " + preferredPort + " in use, falling back to ephemeral");
+        server.listen(0, "127.0.0.1", resolve);
+      } else {
+        reject(err);
+      }
+    });
+    server.listen(preferredPort, "127.0.0.1", resolve);
   });
-  
+
   const port = server.address().port;
   const endpoint = { port, token, pid: process.pid, startedAt: Date.now() };
   writeDaemonEndpoint(endpoint);
-  
+
   await ensureStandbyMpv();
-  
+
   const close = () => new Promise((resolve) => {
     clearDaemonEndpoint();
     killStandbyMpv();
-    for (const [, client] of wsClients) {
-      sendWsClose(client.socket);
-    }
-    wsClients.clear();
     if (persistentSocket) {
       persistentSocket.destroy();
       persistentSocket = null;
@@ -922,78 +1047,42 @@ async function startLaunchDaemon(options) {
       resolve();
     });
   });
-  
-  activeServer = { server, port, token, endpoint, close };
+
+activeServer = { server, port, token, endpoint, close };
   return activeServer;
 }
 
-function handleWebSocketUpgrade(req, socket, _head) {
-  const key = req.headers["sec-websocket-key"];
-  if (!key) {
-    socket.destroy();
-    return;
-  }
-  
-  const acceptKey = crypto
-    .createHash("sha1")
-    .update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
-    .digest("base64");
-  
-  const headers = [
-    "HTTP/1.1 101 Switching Protocols",
-    "Upgrade: websocket",
-    "Connection: Upgrade",
-    "Sec-WebSocket-Accept: " + acceptKey,
-    "",
-    ""
-  ].join("\r\n");
-  
-  socket.write(headers);
-  
-  const clientId = ++wsClientIdCounter;
-  const client = {
-    id: clientId,
-    socket,
-    tabId: null,
-    role: null,
-    lastPing: Date.now(),
-    alive: true,
-    buffer: Buffer.alloc(0)
-  };
-  wsClients.set(clientId, client);
-  
-  socket.on("data", (data) => {
-    client.buffer = Buffer.concat([client.buffer, data]);
-    client.buffer = parseWsFrames(client.buffer, wsClients, clientId);
-  });
-  
-  socket.on("close", () => {
-    client.alive = false;
-    wsClients.delete(clientId);
-    appendLaunchLog("[" + new Date().toISOString() + "] WS client disconnected: " + clientId);
-  });
-  
-  socket.on("error", (_err) => {
-    client.alive = false;
-    wsClients.delete(clientId);
-  });
-  
-  appendLaunchLog("[" + new Date().toISOString() + "] WS client connected: " + clientId);
-}
-
 async function ensureLaunchDaemon(timeoutMs) {
+  // Check cached endpoint from daemon.json
   const cached = readDaemonEndpoint();
   if (cached && await isHealthy(cached)) return cached;
+
   if (starting) return starting;
   starting = (async () => {
     const current = readDaemonEndpoint();
     if (current && await isHealthy(current)) return current;
     try {
       const isNode = !process.pkg && /^node(?:\.exe)?$/i.test(path.basename(process.execPath));
+      const daemonScriptPath = path.join(__dirname, "index.js");
       const args = isNode
-        ? [path.join(__dirname, "index.js"), "--launch-daemon"]
+        ? [daemonScriptPath, "--launch-daemon"]
         : ["--launch-daemon"];
-      const child = spawn(process.execPath, args, { detached: true, stdio: "ignore", windowsHide: true });
+
+      let child;
+      if (process.platform === "win32") {
+        // On Windows, spawn detached from Job Object using reliable Node spawn
+        // This prevents Brave's Native Messaging Job Object from killing the daemon
+        const nodeExe = process.execPath;
+        child = spawn(nodeExe, args, {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true,
+          cwd: __dirname,
+        });
+      } else {
+        child = spawn(process.execPath, args, { detached: true, stdio: "ignore" });
+      }
+
       child.on("error", (err) => logError("spawn failed: " + String((err && err.message) || err)));
       child.unref();
     } catch (err) {
@@ -1006,6 +1095,8 @@ async function ensureLaunchDaemon(timeoutMs) {
       if (endpoint && await isHealthy(endpoint)) return endpoint;
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    // Timeout - delete stale daemon.json so dead ports are never returned
+    clearDaemonEndpoint();
     logError("daemon did not become ready");
     return null;
   })();
@@ -1023,13 +1114,15 @@ module.exports = {
   isHealthy,
   connectPersistentSocket,
   flushIpcCommands,
+  sendPersistentIpc,
+  subscribeToMpvProperties,
+  normalizePlayPayload,
+  dispatchPlay,
   prewarmedStreams,
   IPC_PIPE_PATH,
   spawnStandbyMpv,
   ensureStandbyMpv,
   killStandbyMpv,
-  wsClients,
-  broadcastPlayerTelemetry,
   pipelineState,
   getPipelineState,
   setPipelineStage,

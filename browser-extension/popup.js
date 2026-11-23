@@ -32,11 +32,10 @@ const PipelineStage = {
 };
 
 let cachedPipelineState = null;
-let pipelineUpdateTimer = null;
 
 // Clear stream quality badges (4K / 1080p / HLS / YT-DLP) derived from the URL.
  // Adds AUDIO+VIDEO badge for verified master manifests with audio, or video-only with paired audio.
- // Adds VIDEO ONLY ⚠ warning for video-only sub-playlists without paired audio.
+  // Adds a VIDEO ONLY warning for video-only sub-playlists without paired audio.
 function qualityBadges(it) {
   const u = String(it.url || "").toLowerCase();
   const badges = [];
@@ -69,12 +68,12 @@ function qualityBadges(it) {
   }
   // VIDEO ONLY warning for video-only sub-playlists without paired audio
   else if (it.kind === "hls-video-only" && !it.audioUrl) {
-    badges.push({ text: "VIDEO ONLY ⚠", class: "video-only" });
+      badges.push({ text: "VIDEO ONLY", class: "video-only" });
   }
   // YouTube extracted stream badges
   if (it.type === "youtube-extracted" || it.type === "youtube-extracted") {
     if (it.hasAudio === false && it.isVideoOnly) {
-      badges.push({ text: "VIDEO ONLY ⚠", class: "video-only" });
+    badges.push({ text: "VIDEO ONLY", class: "video-only" });
     } else if (it.hasAudio) {
       badges.push({ text: "AUDIO+VIDEO", class: "audio-video" });
     }
@@ -89,18 +88,19 @@ function qualityBadges(it) {
 
   // PipelineState badges
   if (cachedPipelineState) {
-    if (cachedPipelineState.stage === PipelineStage.SHADOW_READY) {
-      badges.unshift({ text: "⚡ SHADOW READY", class: "shadow-ready" });
-    } else if (cachedPipelineState.stage === PipelineStage.PREWARMING) {
-      badges.unshift({ text: "🔥 PREWARMING", class: "prewarming" });
-    } else if (cachedPipelineState.stage === PipelineStage.PROBING) {
-      badges.unshift({ text: "🔍 PROBING", class: "probing" });
-    } else if (cachedPipelineState.stage === PipelineStage.SNIFFING) {
-      badges.unshift({ text: "📡 SNIFFING", class: "sniffing" });
-    } else if (cachedPipelineState.stage === PipelineStage.LAUNCHING) {
-      badges.unshift({ text: "🚀 LAUNCHING", class: "launching" });
-    } else if (cachedPipelineState.stage === PipelineStage.FAILOVER) {
-      badges.unshift({ text: "🔄 FAILOVER", class: "failover" });
+    const stage = cachedPipelineState.stage;
+    if (stage === PipelineStage.SHADOW_READY) {
+      badges.unshift({ text: "SHADOW READY", class: "shadow-ready" });
+    } else if (stage === PipelineStage.PREWARMING) {
+      badges.unshift({ text: "PREWARMING", class: "prewarming" });
+    } else if (stage === PipelineStage.PROBING) {
+      badges.unshift({ text: "PROBING", class: "probing" });
+    } else if (stage === PipelineStage.SNIFFING) {
+      badges.unshift({ text: "SNIFFING", class: "sniffing" });
+    } else if (stage === PipelineStage.LAUNCHING) {
+      badges.unshift({ text: "LAUNCHING", class: "launching" });
+    } else if (stage === PipelineStage.FAILOVER) {
+      badges.unshift({ text: "FAILOVER", class: "failover" });
     }
   }
 
@@ -190,105 +190,109 @@ async function refreshLinkStatus() {
   dot.classList.toggle("offline", !linked);
   btn.hidden = linked;
   text.textContent = linked ? "Connected" : (res && res.ok ? "Not linked" : "Host offline");
-  
-  // Also fetch bridge status
-  fetchBridgeStatus();
+
+  // Also fetch daemon status
+  await fetchDaemonStatus();
   return linked;
 }
 
-// Fetch and display WebSocket bridge status
-async function fetchBridgeStatus() {
+// Resolve the live daemon port/token: config on disk first, then a ping that
+// asks the native host to (re)start and report the daemon.
+async function resolveDaemonEndpoint() {
   try {
-    const status = await chrome.runtime.sendMessage({ type: "bridge:getStatus" });
-    updateBridgeStatusUI(status);
+    const res = await chrome.runtime.sendMessage({ type: "native", payload: { action: "getConfig" } });
+    if (res && res.config && res.config.daemonPort && res.config.daemonToken) {
+      return { port: res.config.daemonPort, token: res.config.daemonToken };
+    }
   } catch {
-    // Bridge not available, show disconnected
-    updateBridgeStatusUI({ connected: false, candidateCount: 0 });
+    // native host unavailable; try ping below
   }
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "native", payload: { action: "ping" } });
+    const ep = (result && result.daemon) || (result && result.port ? { port: result.port, token: result.token } : null);
+    if (ep && ep.port && ep.token) return { port: ep.port, token: ep.token };
+  } catch {
+    // ignore
+  }
+  return null;
 }
 
-function updateBridgeStatusUI(status) {
-  const bridgeDot = document.getElementById("bridgeDot");
-  const bridgeText = document.getElementById("bridgeText");
-  const bridgeCount = document.getElementById("bridgeCount");
-  
-  if (!bridgeDot || !bridgeText) return;
-  
-  if (status && status.connected) {
-    bridgeDot.classList.add("connected");
-    bridgeDot.classList.remove("offline");
-    bridgeText.textContent = "REAL-TIME WS";
-    bridgeText.style.color = "var(--green-bright)";
-  } else {
-    bridgeDot.classList.add("offline");
-    bridgeDot.classList.remove("connected");
-    bridgeText.textContent = "DISCONNECTED";
-    bridgeText.style.color = "var(--red)";
+// Fetch daemon status via HTTP /health
+async function fetchDaemonStatus() {
+  const daemonDot = document.getElementById("daemonDot");
+  const daemonText = document.getElementById("daemonText");
+
+  if (!daemonDot || !daemonText) return;
+
+  const endpoint = await resolveDaemonEndpoint();
+  if (endpoint) {
+    try {
+      const healthRes = await fetch(`http://127.0.0.1:${endpoint.port}/health`, {
+        method: "GET",
+        cache: "no-store",
+        signal: AbortSignal.timeout(600),
+      });
+      if (healthRes.ok) {
+        daemonDot.classList.add("connected");
+        daemonDot.classList.remove("offline");
+        daemonText.textContent = "LIVE";
+        daemonText.style.color = "var(--emerald-bright)";
+        return;
+      }
+    } catch {
+      // fall through to offline
+    }
   }
-  
-  if (bridgeCount) {
-    bridgeCount.textContent = status && status.candidateCount ? status.candidateCount : "0";
-  }
+
+  daemonDot.classList.add("offline");
+  daemonDot.classList.remove("connected");
+  daemonText.textContent = "OFFLINE";
+  daemonText.style.color = "var(--rose)";
 }
 
 // Update PipelineState UI from daemon
 function updatePipelineStateUI(pipelineState) {
   if (!pipelineState) return;
-  
+
   cachedPipelineState = pipelineState;
-  
-  const stageEl = document.getElementById("pipelineStage");
+
   const stagePill = document.getElementById("stagePill");
   const prewarmEl = document.getElementById("prewarmMs");
   const relayStatsEl = document.getElementById("relayStats");
-  
-  if (stageEl) {
-    const stageLabels = {
-      IDLE: "IDLE",
-      SNIFFING: "SNIFFING",
-      PROBING: "PROBING",
-      PREWARMING: "PREWARMING",
-      SHADOW_READY: "SHADOW READY",
-      LAUNCHING: "LAUNCHING",
-      PLAYING: "PLAYING",
-      FAILOVER: "FAILOVER",
-    };
-    stageEl.textContent = stageLabels[pipelineState.stage] || pipelineState.stage;
-    stageEl.className = "stage-label " + (pipelineState.stage || "").toLowerCase().replace("_", "-");
-  }
-  
+
   if (stagePill) {
     stagePill.className = "stage-pill";
-    if (pipelineState.stage === PipelineStage.SHADOW_READY) {
+    const stage = pipelineState.stage;
+    if (stage === PipelineStage.SHADOW_READY) {
       stagePill.classList.add("shadow-ready");
-      stagePill.textContent = "⚡ SHADOW READY";
-    } else if (pipelineState.stage === PipelineStage.PREWARMING) {
+      stagePill.textContent = "SHADOW READY";
+    } else if (stage === PipelineStage.PREWARMING) {
       stagePill.classList.add("prewarming");
-      stagePill.textContent = "🔥 PREWARMING";
-    } else if (pipelineState.stage === PipelineStage.PROBING) {
+      stagePill.textContent = "PREWARMING";
+    } else if (stage === PipelineStage.PROBING) {
       stagePill.classList.add("probing");
-      stagePill.textContent = "🔍 PROBING";
-    } else if (pipelineState.stage === PipelineStage.SNIFFING) {
+      stagePill.textContent = "PROBING";
+    } else if (stage === PipelineStage.SNIFFING) {
       stagePill.classList.add("sniffing");
-      stagePill.textContent = "📡 SNIFFING";
-    } else if (pipelineState.stage === PipelineStage.LAUNCHING) {
+      stagePill.textContent = "SNIFFING";
+    } else if (stage === PipelineStage.LAUNCHING) {
       stagePill.classList.add("launching");
-      stagePill.textContent = "🚀 LAUNCHING";
-    } else if (pipelineState.stage === PipelineStage.FAILOVER) {
+      stagePill.textContent = "LAUNCHING";
+    } else if (stage === PipelineStage.FAILOVER) {
       stagePill.classList.add("failover");
-      stagePill.textContent = "🔄 FAILOVER";
+      stagePill.textContent = "FAILOVER";
     } else {
-      stagePill.textContent = pipelineState.stage;
+      stagePill.textContent = stage;
     }
   }
-  
+
   if (prewarmEl && pipelineState.prewarmMs) {
     prewarmEl.textContent = `${pipelineState.prewarmMs}ms`;
     prewarmEl.style.display = "inline";
   } else if (prewarmEl) {
     prewarmEl.style.display = "none";
   }
-  
+
   if (relayStatsEl && pipelineState.relayStats && pipelineState.relayStats.bytesPrefetched) {
     const mb = (pipelineState.relayStats.bytesPrefetched / 1024 / 1024).toFixed(1);
     const segs = pipelineState.relayStats.segmentsCached || 0;
@@ -297,7 +301,7 @@ function updatePipelineStateUI(pipelineState) {
   } else if (relayStatsEl) {
     relayStatsEl.style.display = "none";
   }
-  
+
   // Re-render lists to show PipelineState badges (async, non-blocking)
   if (cachedPipelineState && cachedPipelineState.candidates) {
     void (async () => {
@@ -314,38 +318,73 @@ function updatePipelineStateUI(pipelineState) {
   }
 }
 
-// Listen for PipelineState updates from background.js
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.type === "pipeline:state" && msg.payload) {
-    // Use void to handle async without blocking
-    void updatePipelineStateUI(msg.payload);
-  } else if (msg.type === "player:telemetry") {
-    // Update live telemetry if needed
+// PipelineState polling via HTTP /state endpoint (only while popup is open)
+let pipelinePollTimer = null;
+let daemonEndpoint = null;
+
+// Fetch daemon endpoint from the native host (validated via /health).
+async function fetchDaemonEndpoint() {
+  return resolveDaemonEndpoint();
+}
+
+// Poll PipelineState from daemon via HTTP /state
+async function pollPipelineState() {
+  if (!daemonEndpoint) {
+    daemonEndpoint = await fetchDaemonEndpoint();
+    if (!daemonEndpoint) return;
   }
-});
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${daemonEndpoint.port}/state`, {
+      method: "GET",
+      cache: "no-store",
+      headers: { "X-Enhanced-Mpv-Token": daemonEndpoint.token },
+      signal: AbortSignal.timeout(400),
+    });
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        daemonEndpoint = null; // Force re-fetch
+      }
+      return;
+    }
+    const data = await res.json();
+    if (data && data.payload) {
+      cachedPipelineState = data.payload;
+      updatePipelineStateUI(data.payload);
+    }
+  } catch {
+    // Ignore network errors - daemon may be restarting
+  }
+}
 
 function startPipelineStatePolling() {
-  if (pipelineUpdateTimer) return;
-  pipelineUpdateTimer = setInterval(async () => {
-    try {
-      const sessionState = await chrome.storage.session.get("pipelineState");
-      if (sessionState && sessionState.pipelineState) {
-        updatePipelineStateUI(sessionState.pipelineState);
-      }
-    } catch { /* ignore */ }
-  }, 500);
+  if (pipelinePollTimer) return;
+  // Initial immediate poll
+  pollPipelineState();
+  // Then poll every 400ms
+  pipelinePollTimer = setInterval(pollPipelineState, 400);
 }
 
 function stopPipelineStatePolling() {
-  if (pipelineUpdateTimer) {
-    clearInterval(pipelineUpdateTimer);
-    pipelineUpdateTimer = null;
+  if (pipelinePollTimer) {
+    clearInterval(pipelinePollTimer);
+    pipelinePollTimer = null;
   }
+  daemonEndpoint = null;
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  chrome.runtime.sendMessage({ type: "native", payload: { action: "prewarm" } });
+  chrome.runtime.sendMessage({ type: "native", payload: { action: "prewarm" } }).catch(() => {});
+  refreshLinkStatus();
   startPipelineStatePolling();
+  fetchDaemonStatus();
+
+  chrome.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
+    const tab = tabs && tabs[0];
+    if (tab && tab.id != null) {
+      chrome.runtime.sendMessage({ type: "REQUEST_TAB_SCAN", tabId: tab.id }).catch(() => {});
+    }
+  }).catch(() => {});
 });
 
 window.addEventListener("beforeunload", () => {
@@ -590,7 +629,7 @@ async function pausePlaybackInFrame(tabId, best) {
 async function go(action, explicitUrl, forcePageUrl = false) {
   const progressEl = $("launchProgress");
   const primaryActions = document.querySelector(".primary-actions");
-  
+
   // Show progress indicator immediately (< 16ms)
   if (primaryActions) primaryActions.style.display = "none";
   if (progressEl) {
@@ -636,7 +675,7 @@ async function go(action, explicitUrl, forcePageUrl = false) {
   // Step 2: Handing off to native host
   setStep(progressEl, 1, "done");
   setStep(progressEl, 2, "active");
-  
+
   const url = explicitUrl || await selectedUrl();
   const out = await chrome.runtime.sendMessage({
     type: "launch",
@@ -647,20 +686,20 @@ async function go(action, explicitUrl, forcePageUrl = false) {
     startTimeSource,
     forcePageUrl,
   });
-  
+
   // Step 3: Opening Enhanced MPV
   setStep(progressEl, 2, "done");
   setStep(progressEl, 3, "active");
-  
+
   // Brief delay to show completion, then close
   await new Promise(r => setTimeout(r, 200));
   setStep(progressEl, 3, "done");
-  
+
   // Hide progress and restore buttons
   await new Promise(r => setTimeout(r, 100));
   if (progressEl) progressEl.hidden = true;
   if (primaryActions) primaryActions.style.display = "";
-  
+
   $("play").disabled = false;
   showError(out && out.result);
 }

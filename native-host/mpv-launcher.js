@@ -61,14 +61,24 @@ function cleanStaleTempSubs() {
 function resolveMpvBin() {
   if (cachedMpvBin && fs.existsSync(cachedMpvBin)) return cachedMpvBin;
   
+  const preferred = process.platform === "win32"
+    ? path.join(process.env.LOCALAPPDATA || "", "Programs", "EnhancedMPV", "enhanced-mpv.exe")
+    : "";
+  if (preferred && fs.existsSync(preferred) && isNativeMpv(preferred)) {
+    cachedMpvBin = preferred;
+    return cachedMpvBin;
+  }
+
   const env = process.env.MPV_PATH;
   if (env && fs.existsSync(env) && isNativeMpv(env)) {
     cachedMpvBin = env;
     return cachedMpvBin;
   }
-  
-  const found = [which("mpv"), which("mpv.exe"), which("mpv.com")]
-    .find((candidate) => candidate && isNativeMpv(candidate));
+
+  const found = [
+    which("enhanced-mpv.exe"), which("enhanced-mpv"), which("mpv.exe"), which("mpv"),
+  ]
+    .find((candidate) => candidate && isNativeMpv(candidate) && !/\.com$/i.test(candidate));
   if (found) {
     cachedMpvBin = found;
     return cachedMpvBin;
@@ -81,9 +91,9 @@ function resolveMpvBin() {
     const guesses = [
       path.join(local, "Programs", "EnhancedMPV", "enhanced-mpv.exe"),
       path.join(local, "Programs", "mpv", "mpv.exe"),
-      path.join(local, "Programs", "mpv", "mpv.com"),
+      path.join(local, "Programs", "mpv", "enhanced-mpv.exe"),
       path.join(local, "Microsoft", "WinGet", "Links", "mpv.exe"),
-      path.join(local, "Microsoft", "WinGet", "Links", "mpv.com"),
+      path.join(local, "Microsoft", "WinGet", "Links", "enhanced-mpv.exe"),
       path.join(pf, "mpv", "mpv.exe"),
       path.join(pf86, "mpv", "mpv.exe"),
       "C:\\mpv\\mpv.exe",
@@ -245,8 +255,8 @@ function authHeaderObject(audioHeaders) {
 }
 
 const FAST_START_OPTIONS = {
-  "demuxer-lavf-analyzeduration": "0.1",
-  "demuxer-lavf-probesize": "32768",
+  "demuxer-lavf-analyzeduration": "0.5",
+  "demuxer-lavf-probesize": "262144",
   "cache": "yes",
   "cache-secs": "15",
   "demuxer-readahead-secs": "5",
@@ -378,8 +388,8 @@ function sendIpc(command, target, timeoutMs) {
   });
 }
 
-async function sendScriptMessage(message, target, timeoutMs) {
-  return sendIpc(["script-message", message], target, timeoutMs || 300);
+async function sendScriptMessage(message, target, timeoutMs, ...args) {
+  return sendIpc(["script-message", message, ...args], target, timeoutMs || 300);
 }
 
 function pidFilePath() {
@@ -555,11 +565,41 @@ function redactStderr(text) {
     .replace(/--demuxer-lavf-o=headers=[^\s]*/gi, "--demuxer-lavf-o=headers=<redacted>");
 }
 
-function spawnMpv(mpvBin, args, spawnStartMs) {
+function spawnMpv(mpvBin, args, spawnStartMs, options = {}) {
   ensureDir(configDir());
   const logFile = path.join(configDir(), "mpv-runtime.log");
   const mpvArgs = [...args, "--log-file=" + logFile];
   const started = spawnStartMs || Date.now();
+  if (process.platform === "win32" && options.visible === true) {
+    // Native Messaging processes can be placed in the browser's Job Object.
+    // Start-Process creates the player as a separate user process so it stays
+    // alive after the short-lived host exits, with a visible normal window.
+    const psQuote = (value) => "'" + String(value).replace(/'/g, "''") + "'";
+    const winQuote = (value) => {
+      const s = String(value);
+      if (!/[\s"]/.test(s)) return s;
+      return '"' + s.replace(/(\\*)"/g, "$1$1\\\"").replace(/(\\+)$/g, "$1$1") + '"';
+    };
+    const visibleArgs = mpvArgs.filter((arg) => !arg.startsWith("--force-window=") && !arg.startsWith("--window-minimized="));
+    visibleArgs.unshift("--window-minimized=no", "--force-window=yes");
+    const argumentLine = visibleArgs.map(winQuote).join(" ");
+    const script = "$p=Start-Process -FilePath " + psQuote(mpvBin) + " -ArgumentList " + psQuote(argumentLine) +
+      " -PassThru -WindowStyle Normal; [Console]::Out.WriteLine($p.Id)";
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], {
+      encoding: "utf8", windowsHide: true, timeout: 10000,
+    });
+    if (result.error || result.status !== 0) {
+      throw result.error || new Error(String(result.stderr || "Start-Process failed").trim());
+    }
+    const pid = Number(String(result.stdout || "").trim().split(/\r?\n/).pop());
+    if (pid) {
+      try { fs.writeFileSync(pidFilePath(), String(pid), "utf8"); } catch { /* best effort */ }
+    }
+    appendLaunchLog("[" + new Date().toISOString() + "] detached mpv spawned pid=" + (pid || "unknown"));
+    appendLaunchLog("[" + new Date().toISOString() + "] spawn_ms=" + (Date.now() - started) + " " +
+      JSON.stringify(publicCommand(mpvBin, visibleArgs)));
+    return;
+  }
   const child = spawn(mpvBin, mpvArgs, {
     detached: true,
     stdio: ["ignore", "ignore", "pipe"],
@@ -685,7 +725,7 @@ async function loadFileIpc(url, mode, startTime, target, extra) {
 
     // 2. Fire the loading-screen splash AND focus message (60 fps ASS overlay) while ytdl_hook resolves
     await sendScriptMessage("enhanced-mpv-focus", target, 300);
-    await sendScriptMessage("enhanced-mpv-loading", target, 300);
+    await sendScriptMessage("enhanced-mpv-loading", target, 300, sanitizeTitle(opts.title || ""));
 
     // 3. Load the file with per-file options. Log exact IPC command and response.
     const loadfileCmd = ["loadfile", url, mode, -1, options];
@@ -727,6 +767,7 @@ async function replaceViaIpc(payload, args, target, wantQueue) {
   await loadFileIpc(payload.url, wantQueue ? "append-play" : "replace", payload.startTime, target, {
     duration: payload.duration,
     startTimeSource: payload.startTimeSource,
+    title: payload.title,
     options: plan.options,
   });
   if (wantQueue) return;
@@ -990,7 +1031,7 @@ async function play(payload, mode) {
   }
 
   try {
-    spawnMpv(mpvBin, args, Date.now());
+    spawnMpv(mpvBin, args, Date.now(), { visible: true });
     void subtitleFilesPromise.then((files) => attachSubtitlesWhenReady(files, ipcPath())).catch((err) => {
       appendLaunchLog("[" + new Date().toISOString() + "] subtitle attach failed: " +
         String((err && err.message) || err));
@@ -1327,6 +1368,7 @@ module.exports = {
   startRelayDaemon,
   relayMaster,
   findMpv: resolveMpvBin,
+  resolveMpvBin,
   buildArgs,
   isNativeMpv,
   resumeStart,

@@ -23,6 +23,10 @@ function prefetchCacheKey(videoUrl, audioUrl) {
   return videoUrl + "|" + (audioUrl || "");
 }
 
+function resourceCacheKey(url) {
+  return "resource:" + url;
+}
+
 function evictPrefetchCache(targetBytes) {
   const entries = [...prefetchCache.entries()];
   entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
@@ -36,6 +40,11 @@ function evictPrefetchCache(targetBytes) {
 function addToPrefetchCache(key, data) {
   const size = data.length;
   if (size > PREFETCH_CACHE_MAX_BYTES) return;
+  const previous = prefetchCache.get(key);
+  if (previous) {
+    prefetchCacheSize -= previous.size;
+    prefetchCache.delete(key);
+  }
   while (prefetchCacheSize + size > PREFETCH_CACHE_MAX_BYTES) {
     evictPrefetchCache(prefetchCacheSize - size);
   }
@@ -82,15 +91,19 @@ async function prefetchStreamSegments(masterUrl, headers) {
     const masterText = masterRes.body.toString("utf8");
     const masterParsed = parseM3U8(masterText, masterUrl);
 
-    if (!masterParsed.isMaster || !masterParsed.variants.length) return;
+    addToPrefetchCache(resourceCacheKey(masterUrl), masterRes.body);
 
-    // Pick highest bandwidth variant
-    const bestVariant = masterParsed.variants[0];
-    const variantUrl = bestVariant.url;
+    // Pick the highest ranked variant, or use the supplied playlist directly.
+    const variantUrl = masterParsed.isMaster && masterParsed.variants.length
+      ? masterParsed.variants[0].url
+      : masterUrl;
 
-    // 2. Fetch variant playlist
-    const variantRes = await fetchWithHeaders(variantUrl, headers, 5000);
+    // 2. Fetch variant playlist and keep each resource independently addressable.
+    const variantRes = variantUrl === masterUrl
+      ? masterRes
+      : await fetchWithHeaders(variantUrl, headers, 5000);
     if (variantRes.statusCode !== 200 && variantRes.statusCode !== 206) return;
+    addToPrefetchCache(resourceCacheKey(variantUrl), variantRes.body);
     const variantText = variantRes.body.toString("utf8");
     parseM3U8(variantText, variantUrl); // Parse to validate structure
 
@@ -125,19 +138,14 @@ async function prefetchStreamSegments(masterUrl, headers) {
 
     if (urlsToFetch.length === 0) return;
 
-    const results = await fetchSegmentsConcurrently(urlsToFetch, headers, { concurrency: 4 });
+    const results = await fetchSegmentsConcurrently(urlsToFetch, headers, { concurrency: 3 });
 
-    // 5. Combine all fetched data into a single buffer for cache
-    const chunks = [];
+    // 5. Store init data and the first two segments separately in the RAM LRU.
     for (let i = 0; i < results.length; i++) {
       if (results[i].ok) {
-        chunks.push(results[i].res.body);
+        addToPrefetchCache(resourceCacheKey(urlsToFetch[i]), results[i].res.body);
       }
     }
-    if (chunks.length === 0) return;
-
-    const combined = Buffer.concat(chunks);
-    addToPrefetchCache(cacheKey, combined);
   } catch {
     // Silently ignore prefetch failures
   } finally {
@@ -150,7 +158,11 @@ function serveFromPrefetchCache(key, res) {
   const data = getFromPrefetchCache(key);
   if (!data) return false;
 
-  res.setHeader("Content-Type", "video/mp2t");
+  const url = key.startsWith("resource:") ? key.slice("resource:".length) : "";
+  const contentType = /\.m3u8(?:$|[?#])/i.test(url) ? "application/vnd.apple.mpegurl"
+    : /\.mpd(?:$|[?#])/i.test(url) ? "application/dash+xml"
+      : /\.mp4(?:$|[?#])/i.test(url) ? "video/mp4" : "video/mp2t";
+  res.setHeader("Content-Type", contentType);
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Cache-Control", "no-store");
   res.writeHead(200);
@@ -547,7 +559,7 @@ async function relayPlaylist(res, playlistUrl, headers, base) {
 async function relayResource(req, res, resourceUrl, headers, base, masterUrl) {
   // Check prefetch cache first for instant serving of init segment + first 2 segments
   if (masterUrl) {
-    const cacheKey = prefetchCacheKey(masterUrl, null);
+    const cacheKey = resourceCacheKey(masterUrl);
     if (serveFromPrefetchCache(cacheKey, res)) {
       return;
     }
@@ -804,6 +816,7 @@ function stopRelay(token) {
       const videoSubKey = relay.videoToken + "-video";
       const videoSubRelay = activeRelays.get(videoSubKey);
       if (videoSubRelay) {
+        try { if (typeof videoSubRelay.server.closeAllConnections === "function") videoSubRelay.server.closeAllConnections(); } catch { /* unsupported */ }
         videoSubRelay.server.close();
         activeRelays.delete(videoSubKey);
       }
@@ -812,10 +825,12 @@ function stopRelay(token) {
       const audioSubKey = relay.audioToken + "-audio";
       const audioSubRelay = activeRelays.get(audioSubKey);
       if (audioSubRelay) {
+        try { if (typeof audioSubRelay.server.closeAllConnections === "function") audioSubRelay.server.closeAllConnections(); } catch { /* unsupported */ }
         audioSubRelay.server.close();
         activeRelays.delete(audioSubKey);
       }
     }
+    try { if (typeof relay.server.closeAllConnections === "function") relay.server.closeAllConnections(); } catch { /* unsupported */ }
     relay.server.close();
     activeRelays.delete(token);
   }

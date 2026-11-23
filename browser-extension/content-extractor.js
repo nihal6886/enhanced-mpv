@@ -1,5 +1,9 @@
 "use strict";
 
+(() => {
+if (window.__empvExtractorInstalled) return;
+window.__empvExtractorInstalled = true;
+
 const YT_INITIAL_PLAYER_RESPONSE = "ytInitialPlayerResponse";
 const YOUTUBEI_PLAYER_PATTERN = /youtubei\/v1\/player/;
 const HLS_MASTER_PATTERN = /#EXT-X-STREAM-INF/;
@@ -421,3 +425,4 @@ try {
 } catch (e) {
   console.warn("[Enhanced MPV] content-extractor initialization failed:", e);
 }
+})();

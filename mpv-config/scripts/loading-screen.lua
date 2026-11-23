@@ -1,132 +1,18 @@
 -- Enhanced MPV - Studio-Grade Dark Studio Loading Sequence
 -- 60 fps ASS overlay: dual-arc neon ring, 15-bar waveform, centered title, dynamic status
 -- Center-anchored (\an5) all elements using dynamic osd-dimensions (cx = w/2, cy = h/2)
--- Dynamic status from stream-controller.lua: PROBING STREAM 1/3... -> BUFFERING... -> SWITCHING TO STREAM 2/3...
--- Cross-fades \alpha out over 160ms once video-out-params confirms real frame (width > 0, height > 0)
-
-local mp = require("mp")
-local assdraw = require("mp.assdraw")
-
-local opts = {
-    enabled = true,
-    duration_ms = 1200,
-    fade_ms = 160,
-}
-require("mp.options").read_options(opts, "loading-screen")
-if not opts.enabled then return end
-
-local BG = "0D1117"
-local GREEN = "4ADE80"
-local GREEN_DIM = "2D5A43"
-local TEXT = "F0F6FC"
-local MUTED = "8B949E"
-local PANEL = "161B22"
-
-local overlay = mp.create_osd_overlay("ass-events")
-local timer = nil
-local start_us = nil
-local fade_us = nil
-local visible = false
-local last_text = ""
-local base_w, base_h = 1920, 1080
-
--- Dynamic status from stream-controller.lua
-local dynamic_status = "INITIALIZING..."
-local sniffer_state = "IDLE"
-local zero_wait_ready = false
-
-local function clamp(v, lo, hi)
-    if v < lo then return lo end
-    if v > hi then return hi end
-    return v
-end
-
-local function ease_out(t)
-    t = clamp(t, 0, 1)
-    return 1 - (1 - t) * (1 - t)
-end
-
-local function ass_rgb(rgb)
-    return string.format("&H%s&", rgb)
-end
-
-local function ass_alpha(alpha)
-    alpha = clamp(alpha or 0, 0, 255)
-    return string.format("&H%02X&", alpha)
-end
-
-local function update_base()
-    local w, h = mp.get_osd_size()
-    if w and h and w > 0 and h > 0 then
-        base_w, base_h = w, h
-    end
-end
-
-local function cx()
-    return math.floor(base_w / 2)
-end
-
-local function cy()
-    return math.floor(base_h / 2)
-end
-
-local function safe_text(value, fallback)
-    value = tostring(value or ""):gsub("[\r\n]+", " "):gsub("{", ""):gsub("}", "")
-    value = value:gsub("^%s+", ""):gsub("%s+$", "")
-    if value == "" then return fallback end
-    if #value > 72 then value = value:sub(1, 69) .. "..." end
-    return value
-end
-
-local function media_title()
-    local forced = mp.get_property("force-media-title")
-    if forced and forced ~= "" and not forced:match("^https?://") then return forced end
-    local title = mp.get_property("media-title")
-    if title and title ~= "" and not title:match("^https?://") then return title end
-    local filename = mp.get_property("filename/no-ext")
-    if filename and filename ~= "" then return filename end
-    return "Enhanced MPV"
-end
-
-local function quality_pill()
-    local h = mp.get_property_number("height", 0)
-    local fps = mp.get_property_number("container-fps", 0)
-    local vcodec = mp.get_property("video-codec") or ""
-    local codec = "VIDEO"
-    if vcodec:match("av01") or vcodec:lower():match("av1") then codec = "AV1"
-    elseif vcodec:match("hev") or vcodec:match("265") then codec = "HEVC"
-    elseif vcodec:match("avc") or vcodec:match("264") then codec = "H264"
-    elseif vcodec:match("vp9") then codec = "VP9"
-    elseif vcodec:match("vp8") then codec = "VP8"
-    end
-    local parts = {}
-    if h > 0 then parts[#parts + 1] = tostring(math.floor(h + 0.5)) .. "p" end
-    if fps > 0 then parts[#parts + 1] = string.format("%.0ffps", fps) end
-    parts[#parts + 1] = codec
-    return table.concat(parts, "  ")
-end
-
-local function cache_fraction()
-    local demux = mp.get_property_number("demuxer-cache-duration", 0) or 0
-    local cache = mp.get_property_number("cache-buffering-state", 0) or 0
-    if cache > 0 then return clamp(cache / 100, 0, 1) end
-    return clamp(demux / 8, 0, 1)
-end
-
--- Enhanced MPV - Studio-Grade Dark Studio Loading Sequence
--- 60 fps ASS overlay: dual-arc neon ring, 15-bar waveform, centered title, dynamic status
--- Center-anchored (\an5) all elements using dynamic osd-dimensions (cx = w/2, cy = h/2)
 -- Dynamic status from PipelineState: SNIFFING -> PROBING -> PREWARMING -> SHADOW_READY -> LAUNCHING -> PLAYING | FAILOVER
--- Cross-fades \alpha out over 160ms once video-out-params confirms real frame (width > 0, height > 0)
+-- Cross-fades \alpha out over 150ms once video-out-params confirms a real frame.
 
 local mp = require("mp")
 local assdraw = require("mp.assdraw")
 local utils = require("mp.utils")
+local msg = require("mp.msg")
 
 local opts = {
     enabled = true,
     duration_ms = 1200,
-    fade_ms = 160,
+    fade_ms = 150,
 }
 require("mp.options").read_options(opts, "loading-screen")
 if not opts.enabled then return end
@@ -149,12 +35,23 @@ local last_text = ""
 local base_w, base_h = 1920, 1080
 
 -- PipelineState from stream-controller.lua
-local pipeline_stage = "IDLE"
+local pipeline_stage = "BUFFERING"
 local pipeline_candidate = nil
 local pipeline_relay_stats = {}
 local pipeline_prewarm_ms = 0
 local pipeline_launch_ms = 0
 local zero_wait_ready = false
+local loading_title = ""
+
+-- Track video readiness state
+local video_width = 0
+local video_height = 0
+local core_idle = true
+
+-- Forward declarations: the script-message and property callbacks below can fire
+-- at any time, so these locals must exist before they are referenced.
+local stop_overlay
+local try_crossfade
 
 local function clamp(v, lo, hi)
     if v < lo then return lo end
@@ -200,6 +97,7 @@ local function safe_text(value, fallback)
 end
 
 local function media_title()
+    if loading_title ~= "" then return loading_title end
     local forced = mp.get_property("force-media-title")
     if forced and forced ~= "" and not forced:match("^https?://") then return forced end
     local title = mp.get_property("media-title")
@@ -261,6 +159,10 @@ mp.register_script_message("sniffer_state_change", function(json)
     if ok and data then
         if data.state then pipeline_stage = data.state end
         if data.zero_wait_ready ~= nil then zero_wait_ready = data.zero_wait_ready end
+        -- If SHADOW_READY achieved, stop the loading overlay immediately
+        if pipeline_stage == "SHADOW_READY" and zero_wait_ready and visible then
+            stop_overlay()
+        end
     end
 end)
 
@@ -273,7 +175,7 @@ end)
 
 local function get_dynamic_status()
     if pipeline_stage == "SHADOW_READY" then
-        return string.format("⚡ SHADOW READY - %.0fms prewarm - INSTANT LAUNCH", pipeline_prewarm_ms)
+        return string.format("SHADOW READY - %.0fms prewarm - INSTANT LAUNCH", pipeline_prewarm_ms)
     elseif pipeline_stage == "PREWARMING" then
         local title = pipeline_candidate and pipeline_candidate.title or "stream"
         return string.format("PREWARMING: %s...", safe_text(title, "stream"))
@@ -290,10 +192,12 @@ local function get_dynamic_status()
         return "PLAYING"
     elseif pipeline_stage == "FAILOVER" then
         return "FAILOVER: SEARCHING NEXT STREAM..."
+    elseif pipeline_stage == "BUFFERING" then
+        return "BUFFERING..."
     elseif pipeline_stage == "IDLE" then
         return "IDLE"
     end
-    return "INITIALIZING..."
+    return "BUFFERING..."
 end
 
 local function get_relay_status_line()
@@ -349,7 +253,7 @@ local function render(now_us)
     a:pos(0, 0)
     a:append(string.format("{\\an7\\bord10\\shad0\\1a&HFF&\\3c&H%s&\\3a&H%02X&}", GREEN, clamp(alpha + 170 - math.floor(pulse * 30), 0, 255)))
     a:draw_start()
-    a:round_rect_cw(ring_cx - r, ring_cy - r, ring_cx + r, ring_cx + r, r)
+    a:round_rect_cw(ring_cx - r, ring_cy - r, ring_cx + r, ring_cy + r, r)
     a:draw_stop()
 
     -- Ring track
@@ -357,7 +261,7 @@ local function render(now_us)
     a:pos(0, 0)
     a:append(string.format("{\\an7\\bord4\\shad0\\1a&HFF&\\3c&H%s&\\3a&H%02X&}", GREEN_DIM, clamp(alpha + 90, 0, 255)))
     a:draw_start()
-    a:round_rect_cw(ring_cx - r, ring_cy - r, ring_cx + r, ring_cx + r, r)
+    a:round_rect_cw(ring_cx - r, ring_cy - r, ring_cx + r, ring_cy + r, r)
     a:draw_stop()
 
     -- Spinning arc segments (3 arcs, 120deg apart)
@@ -404,6 +308,7 @@ local function render(now_us)
     a:new_event()
     a:pos(0, 0)
     a:append(string.format("{\\an5\\fs20\\b1\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", GREEN, alpha))
+    a:draw_start()
     a:move_to(cx_pos - 100, badge_y)
     a:line_to(cx_pos + 100, badge_y)
     a:draw_stop()
@@ -483,7 +388,7 @@ local function render(now_us)
     end
 end
 
-local function stop_overlay()
+stop_overlay = function()
     if timer then timer:kill(); timer = nil end
     visible = false
     start_us = nil
@@ -501,6 +406,7 @@ local function start_overlay()
     timer = mp.add_periodic_timer(1 / 60, function()
         render(mp.get_time() * 1000000)
     end)
+    try_crossfade()
 end
 
 local function crossfade_out()
@@ -511,15 +417,33 @@ end
 
 mp.register_event("start-file", start_overlay)
 
-mp.register_script_message("enhanced-mpv-loading", function()
+mp.register_script_message("enhanced-mpv-loading", function(title)
+    loading_title = safe_text(title, "")
     start_overlay()
 end)
 
 mp.observe_property("video-out-params", "native", function(_, value)
     if value and value.w and value.h and value.w > 0 and value.h > 0 then
-        crossfade_out()
+        video_width = value.w
+        video_height = value.h
+        try_crossfade()
     end
 end)
+
+mp.observe_property("core-idle", "native", function(_, value)
+    core_idle = (value == true)
+    if value == false then
+        try_crossfade()
+    end
+end)
+
+try_crossfade = function()
+    -- Crossfade only when real video dimensions exist, the core is actively
+    -- decoding (not idle), and we are not on the SHADOW_READY hot path.
+    if video_width > 0 and video_height > 0 and not core_idle then
+        crossfade_out()
+    end
+end
 
 mp.register_event("end-file", stop_overlay)
 mp.register_event("shutdown", stop_overlay)

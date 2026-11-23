@@ -13,6 +13,7 @@ param(
   [switch]$Yes,
   [switch]$Force,
   [switch]$DevTools,
+  [switch]$OpenOnboarding,
   [string]$Repo = $(if ($env:ENHANCED_MPV_REPO) { $env:ENHANCED_MPV_REPO } else { "nihal6886/enhanced-mpv" }),
   [string]$Branch = $(if ($env:ENHANCED_MPV_BRANCH) { $env:ENHANCED_MPV_BRANCH } else { "main" })
 )
@@ -70,6 +71,12 @@ if (-not $Root) {
 $HostName = "com.enhanced.mpv.host"
 $MpvDir = Join-Path $env:APPDATA "mpv"
 $UserCfg = Join-Path $env:USERPROFILE ".enhanced-mpv"
+$BundledMpvConfig = Join-Path $Root "mpv-config"
+if (-not (Test-Path $BundledMpvConfig -PathType Container)) {
+  $BundledMpvConfig = Join-Path $Root "mpv"
+}
+$BundledHostExe = Join-Path $Root "host\enhanced-mpv-host.exe"
+$InstalledMpvFiles = Join-Path $UserCfg "installed-mpv-files.txt"
 $BackupDir = Join-Path $UserCfg "backups"
 $LaunchLog = Join-Path $UserCfg "last-launch.log"
 $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -293,8 +300,10 @@ function Install-MpvDirect {
 function Backup-File($path) {
   if (-not (Test-Path $path)) { return }
   $destDir = Join-Path $BackupDir $Stamp
-  New-Item -ItemType Directory -Force -Path $destDir | Out-Null
-  Copy-Item $path -Destination (Join-Path $destDir (Split-Path $path -Leaf)) -Force
+  $relative = $path.Substring($MpvDir.Length).TrimStart([char[]]@('\', '/'))
+  $backupPath = Join-Path $destDir $relative
+  New-Item -ItemType Directory -Force -Path (Split-Path $backupPath -Parent) | Out-Null
+  Copy-Item -LiteralPath $path -Destination $backupPath -Force
 }
 
 function Download-Zip($url, $dest) {
@@ -344,16 +353,50 @@ function Unregister-NativeHost {
   }
 }
 
+function Stop-InstalledAppProcesses {
+  try {
+    $matches = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+      $_.ExecutablePath -match '(?i)\\enhanced-mpv\.exe$' -or
+      ($_.CommandLine -match '(?i)launch-daemon' -and $_.Name -match '^(node|enhanced-mpv-host)(\.exe)?$')
+    }
+    $matches | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+      Start-Sleep -Milliseconds 200
+      $matches = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.ExecutablePath -match '(?i)\\enhanced-mpv\.exe$' -or
+        ($_.CommandLine -match '(?i)launch-daemon' -and $_.Name -match '^(node|enhanced-mpv-host)(\.exe)?$')
+      }
+    } while ($matches -and [DateTime]::UtcNow -lt $deadline)
+    if ($matches) { throw "Enhanced MPV processes did not exit before installation continued." }
+  } catch { Write-Warning "Could not enumerate Enhanced MPV processes: $($_.Exception.Message)" }
+}
+
 if ($Uninstall) {
+  Stop-InstalledAppProcesses
   Unregister-NativeHost
-  $copied = @("window-icon.lua", "enhanced-mpv.lua", "smart-sub-manager.lua", "loading-screen.lua", "player-menus.lua") |
-    ForEach-Object { Join-Path $MpvDir "scripts\$_" }
-  foreach ($f in $copied) { if (Test-Path $f) { Remove-Item $f -Force } }
-  $latest = Get-ChildItem $BackupDir -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-  if ($latest) {
-    Copy-Item (Join-Path $latest.FullName "*") $MpvDir -Force -ErrorAction SilentlyContinue
-    Write-Host "Restored backup $($latest.FullName)"
+  $original = Get-ChildItem $BackupDir -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -First 1
+  if (Test-Path $InstalledMpvFiles) {
+    foreach ($relative in Get-Content $InstalledMpvFiles) {
+      if (-not $relative) { continue }
+      $target = Join-Path $MpvDir $relative
+      $backup = if ($original) { Join-Path $original.FullName $relative } else { "" }
+      if ($backup -and (Test-Path $backup -PathType Leaf)) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $target -Parent) | Out-Null
+        Copy-Item -LiteralPath $backup -Destination $target -Force
+      } elseif (Test-Path $target -PathType Leaf) {
+        Remove-Item -LiteralPath $target -Force
+      }
+    }
+    Remove-Item $InstalledMpvFiles -Force
   }
+  $enhancedExe = Join-Path $env:LOCALAPPDATA "Programs\EnhancedMPV\enhanced-mpv.exe"
+  if (Test-Path $enhancedExe) { Remove-Item $enhancedExe -Force -ErrorAction SilentlyContinue }
+  $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Enhanced MPV.lnk"
+  if (Test-Path $shortcut) { Remove-Item $shortcut -Force -ErrorAction SilentlyContinue }
+  $nmDir = Join-Path $UserCfg "native-messaging"
+  if (Test-Path $nmDir) { Remove-Item $nmDir -Recurse -Force -ErrorAction SilentlyContinue }
+  if ($original) { Write-Host "Restored mpv files from $($original.FullName)" }
   Write-Host "Uninstalled native host registration."
   exit 0
 }
@@ -395,71 +438,33 @@ if ($MpvBin) {
 } else {
   Write-Warning "Native mpv.exe/mpv.com was not found. Install mpv.mpv via winget or rerun the installer."
 }
-if (-not (Test-Cmd "node")) { throw "Node.js is required." }
+if (-not (Test-Cmd "node") -and -not (Test-Path $BundledHostExe -PathType Leaf)) {
+  throw "Node.js or the bundled Enhanced MPV host is required."
+}
 if ($WithFfmpeg -and -not (Test-Cmd "ffmpeg")) {
   Write-Warning "ffmpeg is still missing after installing Gyan.FFmpeg.Essentials."
 }
 
-Write-Host "Generating browser-extension icons..."
-node (Join-Path $Root "scripts\generate-icons.js")
-
-# Skip ModernZ release downloads when both assets are already installed. Pass
-# -Force to refresh the script and its icon font.
-$ModernZLua = Join-Path $MpvDir "scripts\modernz.lua"
-$ModernZFont = Join-Path $MpvDir "fonts\modernz-icons.ttf"
-$ModernZScriptDir = Split-Path -Parent $ModernZLua
-$ModernZFontDir = Split-Path -Parent $ModernZFont
-New-Item -ItemType Directory -Force -Path $ModernZScriptDir, $ModernZFontDir | Out-Null
-if ($Force -or -not (Test-Path $ModernZLua) -or -not (Test-Path $ModernZFont)) {
-  Write-Host "Installing the latest ModernZ release..."
-  $modernZUrls = @(
-    @{ lua = "https://github.com/Samillion/ModernZ/releases/latest/download/modernz.lua";
-       font = "https://github.com/Samillion/ModernZ/releases/latest/download/modernz-icons.ttf" },
-    @{ lua = "https://github.com/Samillion/ModernZ/releases/download/v0.3.3/modernz.lua";
-       font = "https://github.com/Samillion/ModernZ/releases/download/v0.3.3/modernz-icons.ttf" }
-  )
-  $modernZOk = $false
-  foreach ($urls in $modernZUrls) {
-    $luaOk = Download-FileWithRetry $urls.lua $ModernZLua
-    $fontOk = Download-FileWithRetry $urls.font $ModernZFont
-    if ($luaOk -and $fontOk) { $modernZOk = $true; break }
-    Write-Warning "ModernZ download from $($urls.lua) failed; trying next source."
-  }
-  if (-not $modernZOk) {
-    Write-Warning "ModernZ could not be downloaded from any source."
-  }
-} else {
-  Write-Host "ModernZ is already installed - skipping release downloads (-Force to refresh)."
+if (-not (Test-Path $BundledMpvConfig -PathType Container)) {
+  throw "Bundled mpv-config tree is required for an offline UI install: $BundledMpvConfig"
 }
-
-$ThumbfastLua = Join-Path $MpvDir "scripts\thumbfast.lua"
-if ($Force -or -not (Test-Path $ThumbfastLua)) {
-  Write-Host "Downloading thumbfast..."
-  Download-Zip "https://github.com/po5/thumbfast/archive/refs/heads/master.zip" (Join-Path $MpvDir "scripts\thumbfast-src")
-  Copy-Item (Join-Path $MpvDir "scripts\thumbfast-src\thumbfast.lua") (Join-Path $MpvDir "scripts\thumbfast.lua") -Force
-  Remove-Item (Join-Path $MpvDir "scripts\thumbfast-src") -Recurse -Force
+if (Test-Cmd "node") {
+  Write-Host "Generating browser-extension icons..."
+  node (Join-Path $Root "scripts\generate-icons.js")
 }
-
-$SubSelectLua = Join-Path $MpvDir "scripts\sub-select.lua"
-if ($Force -or -not (Test-Path $SubSelectLua)) {
-  Write-Host "Downloading mpv-sub-select..."
-  Download-Zip "https://github.com/CogentRedTester/mpv-sub-select/archive/refs/heads/master.zip" (Join-Path $MpvDir "scripts\sub-select-src")
-  Get-ChildItem (Join-Path $MpvDir "scripts\sub-select-src") -Filter "*.lua" -Recurse | Select-Object -First 1 | ForEach-Object {
-    Copy-Item $_.FullName (Join-Path $MpvDir "scripts\sub-select.lua") -Force
-  }
-  Remove-Item (Join-Path $MpvDir "scripts\sub-select-src") -Recurse -Force
+$managedFiles = @(Get-ChildItem $BundledMpvConfig -File -Recurse | ForEach-Object {
+  $_.FullName.Substring($BundledMpvConfig.Length + 1)
+}) + @("enhanced-mpv.ico", "script-opts\ytdl_hook.conf")
+foreach ($relative in $managedFiles | Select-Object -Unique) {
+  Backup-File (Join-Path $MpvDir $relative)
 }
-
-foreach ($f in @("mpv.conf", "input.conf")) {
-  Backup-File (Join-Path $MpvDir $f)
-  Copy-Item (Join-Path $Root "mpv-config\$f") (Join-Path $MpvDir $f) -Force
+[System.IO.File]::WriteAllLines($InstalledMpvFiles, [string[]]($managedFiles | Select-Object -Unique), $Utf8NoBom)
+Get-ChildItem $BundledMpvConfig -File -Recurse | ForEach-Object {
+  $relative = $_.FullName.Substring($BundledMpvConfig.Length + 1)
+  $target = Join-Path $MpvDir $relative
+  New-Item -ItemType Directory -Force -Path (Split-Path $target -Parent) | Out-Null
+  Copy-Item -LiteralPath $_.FullName -Destination $target -Force
 }
-foreach ($f in @("window-icon.lua", "enhanced-mpv.lua", "smart-sub-manager.lua", "loading-screen.lua", "player-menus.lua", "dev-tools.lua", "stream-controller.lua")) {
-  Copy-Item (Join-Path $Root "mpv-config\scripts\$f") (Join-Path $MpvDir "scripts\$f") -Force
-}
-Get-ChildItem (Join-Path $Root "mpv-config\script-opts") -File |
-  Where-Object { $_.Name -ne "uosc.conf" } |
-  ForEach-Object { Copy-Item $_.FullName (Join-Path $MpvDir "script-opts") -Force }
 
 # Custom player icon used by window-icon.lua and the Start Menu shortcut.
 $MpvIco = Join-Path $MpvDir "enhanced-mpv.ico"
@@ -505,7 +510,7 @@ function Stamp-EnhancedMpvIcon {
       Write-Host "Source and destination are the same; skipping copy."
     }
     # Download rcedit-x64.exe from electron/rcedit releases if not cached.
-    $rceditCache = Join-Path $env:LOCALAPPDATA "EnhancedMPV\rcedit-x64.exe"
+    $rceditCache = Join-Path $env:LOCALAPPDATA "Programs\EnhancedMPV\rcedit-x64.exe"
     if (-not (Test-Path $rceditCache)) {
       $rceditUrl = "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe"
       $rceditTmp = Join-Path $env:TEMP "rcedit-x64.exe"
@@ -550,6 +555,7 @@ function Stamp-EnhancedMpvIcon {
   }
 }
 # When -Force is passed, re-stamp by preferring the upstream mpv.exe
+Stop-InstalledAppProcesses
 Stamp-EnhancedMpvIcon
 
 # Pin the resolved mpv binary into thumbfast and disable remote thumbnails so
@@ -616,50 +622,48 @@ if ($ExtensionId) {
   }
 }
 
-$NmDir = Join-Path $UserCfg "native-messaging"
-New-Item -ItemType Directory -Force -Path $NmDir | Out-Null
-
-# Windows Chrome/Edge cannot execute a .js host directly: generate a .bat wrapper
-# that launches node.exe with the absolute path to the host entry point.
-$NodeExe = (Get-Command node).Source
-$IndexJs = Join-Path $Root "native-host\index.js"
-$HostBat = Join-Path $NmDir "enhanced-mpv-host.bat"
-$BatBody = "@echo off`r`n`"$NodeExe`" `"$IndexJs`" %*`r`n"
-[System.IO.File]::WriteAllText($HostBat, $BatBody, $Utf8NoBom)
-
-$HostEsc = $HostBat.Replace("\", "\\")
-
-# Firefox host - uses a fixed gecko id, so no extension id is involved.
-$FfTemplate = Get-Content (Join-Path $Root "native-host\manifests\firefox.json") -Raw
-$FfJson = $FfTemplate.Replace("HOST_PATH", $HostEsc)
-$FfManifest = Join-Path $NmDir "$HostName.firefox.json"
-[System.IO.File]::WriteAllText($FfManifest, $FfJson, $Utf8NoBom)
-New-Item -Path "HKCU:\Software\Mozilla\NativeMessagingHosts\$HostName" -Force | Out-Null
-Set-ItemProperty -Path "HKCU:\Software\Mozilla\NativeMessagingHosts\$HostName" -Name "(default)" -Value $FfManifest
-
-# Chromium host - only written after the user confirms via a native OS prompt.
-if ($ExtensionId) {
-  $confirmed = $false
-  if ($Yes) {
-    $confirmed = $true
-  } else {
-    $confirmed = Confirm-Native ("Link browser extension '$ExtensionId' to Enhanced MPV?`n`n" +
-      "This writes chrome-extension://$ExtensionId/ into the Native Messaging " +
-      "manifest so the extension can launch mpv.")
+if (Test-Path $BundledHostExe -PathType Leaf) {
+  $ChromeManifest = Join-Path $Root "manifests\$HostName.chrome.json"
+  $FfManifest = Join-Path $Root "manifests\$HostName.firefox.json"
+  if (-not (Test-Path $ChromeManifest) -or -not (Test-Path $FfManifest)) {
+    throw "Bundled Native Messaging manifests are missing from $Root\manifests"
   }
-  if ($confirmed) {
-    $ChromeTemplate = Get-Content (Join-Path $Root "native-host\manifests\chrome.json") -Raw
-    $ChromeJson = $ChromeTemplate.Replace("HOST_PATH", $HostEsc).Replace("EXTENSION_ID", $ExtensionId)
-    $ChromeManifest = Join-Path $NmDir "$HostName.chrome.json"
-    [System.IO.File]::WriteAllText($ChromeManifest, $ChromeJson, $Utf8NoBom)
-    Register-NativeHost $ChromeManifest
-    Write-Host "Linked Chromium extension $ExtensionId."
-  } else {
-    Write-Host "Declined - skipped Chromium host registration."
-  }
+  if (-not $ExtensionId) { throw "A Chromium extension ID is required with the bundled host." }
+  Register-NativeHost $ChromeManifest
+  $firefoxKey = "HKCU:\Software\Mozilla\NativeMessagingHosts\$HostName"
+  New-Item -Path $firefoxKey -Force | Out-Null
+  Set-ItemProperty -Path $firefoxKey -Name "(default)" -Value $FfManifest
 } else {
-  Write-Host "No Chromium extension ID supplied - skipped Chromium host registration."
-  Write-Host "Load the unpacked extension, then re-run with -ExtensionId <id>."
+  $NmDir = Join-Path $UserCfg "native-messaging"
+  New-Item -ItemType Directory -Force -Path $NmDir | Out-Null
+  $NodeExe = (Get-Command node -ErrorAction Stop).Source
+  $IndexJs = Join-Path $Root "native-host\index.js"
+  $HostBat = Join-Path $NmDir "enhanced-mpv-host.bat"
+  $BatBody = "@echo off`r`n`"$NodeExe`" `"$IndexJs`" %*`r`n"
+  [System.IO.File]::WriteAllText($HostBat, $BatBody, $Utf8NoBom)
+  $HostEsc = $HostBat.Replace("\", "\\")
+
+  $FfTemplate = Get-Content (Join-Path $Root "native-host\manifests\firefox.json") -Raw
+  $FfJson = $FfTemplate.Replace("HOST_PATH", $HostEsc)
+  $FfManifest = Join-Path $NmDir "$HostName.firefox.json"
+  [System.IO.File]::WriteAllText($FfManifest, $FfJson, $Utf8NoBom)
+  $firefoxKey = "HKCU:\Software\Mozilla\NativeMessagingHosts\$HostName"
+  New-Item -Path $firefoxKey -Force | Out-Null
+  Set-ItemProperty -Path $firefoxKey -Name "(default)" -Value $FfManifest
+
+  if ($ExtensionId) {
+    $confirmed = $Yes -or (Confirm-Native ("Link browser extension '$ExtensionId' to Enhanced MPV?`n`n" +
+      "This writes chrome-extension://$ExtensionId/ into the Native Messaging manifest."))
+    if ($confirmed) {
+      $ChromeTemplate = Get-Content (Join-Path $Root "native-host\manifests\chrome.json") -Raw
+      $ChromeJson = $ChromeTemplate.Replace("HOST_PATH", $HostEsc).Replace("EXTENSION_ID", $ExtensionId)
+      $ChromeManifest = Join-Path $NmDir "$HostName.chrome.json"
+      [System.IO.File]::WriteAllText($ChromeManifest, $ChromeJson, $Utf8NoBom)
+      Register-NativeHost $ChromeManifest
+    }
+  } else {
+    Write-Host "No Chromium extension ID supplied - skipped Chromium host registration."
+  }
 }
 
 Write-Host ""
@@ -668,3 +672,31 @@ Write-Host "1. Edge/Chrome: edge://extensions or chrome://extensions -> Load unp
 Write-Host "2. Re-run with -ExtensionId YOUR_ID to register the Chromium host (skipped if no id was given)."
 Write-Host "3. Health check: node `"$Root\native-host\doctor.js`""
 Write-Host "4. Re-run the installer anytime with: powershell -ExecutionPolicy Bypass -File `"$Root\scripts\install.ps1`""
+
+# Warm the local HTTP daemon at install time. Packaged installs use the bundled
+# host executable; source installs use node with the same launch-daemon entry.
+Stop-InstalledAppProcesses
+if (Test-Path $BundledHostExe -PathType Leaf) {
+  $daemonProc = Start-Process -FilePath $BundledHostExe -ArgumentList "--launch-daemon" -WindowStyle Hidden -PassThru
+} else {
+  $NodeExe = (Get-Command node -ErrorAction Stop).Source
+  $DaemonJs = Join-Path $Root "native-host\index.js"
+  $daemonProc = Start-Process -FilePath $NodeExe -ArgumentList "`"$DaemonJs`" --launch-daemon" -WindowStyle Hidden -PassThru
+}
+Write-Host "Launch daemon started (PID: $($daemonProc.Id))"
+$healthOk = $false
+for ($attempt = 1; $attempt -le 30; $attempt++) {
+  try {
+    $endpoint = Get-Content (Join-Path $UserCfg "daemon.json") -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $health = Invoke-WebRequest -Uri "http://127.0.0.1:$($endpoint.port)/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+    if ($health.StatusCode -eq 200) { $healthOk = $true; break }
+  } catch { Start-Sleep -Milliseconds 150 }
+}
+if (-not $healthOk) { Write-Warning "Launch daemon did not become healthy during the install check." }
+if ($OpenOnboarding) {
+  $onboarding = Join-Path $Root "onboarding\index.html"
+  if (Test-Path $onboarding) {
+    $extensionPath = [uri]::EscapeDataString((Join-Path $Root "browser-extension"))
+    Start-Process -FilePath ($onboarding + "?extPath=" + $extensionPath)
+  }
+}

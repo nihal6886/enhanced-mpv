@@ -23,6 +23,14 @@
   "background": {
     "service_worker": "background.js"
   },
+  "commands": {
+    "launch-active": {
+      "suggested_key": {
+        "default": "Alt+M"
+      },
+      "description": "Launch the active video in Enhanced MPV"
+    }
+  },
   "options_ui": {
     "page": "options.html",
     "open_in_tab": true

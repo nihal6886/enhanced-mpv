@@ -37,14 +37,14 @@ OutputBaseFilename=EnhancedMPV-Setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-SetupIconFile=..\assets\enhanced-mpv.ico
-WizardImageFile=..\assets\wizard-banner.bmp
-WizardSmallImageFile=..\assets\wizard-small.bmp
+SetupIconFile=staging\assets\enhanced-mpv.ico
+WizardImageFile=staging\assets\wizard-banner.bmp
+WizardSmallImageFile=staging\assets\wizard-small.bmp
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 UninstallDisplayName=Enhanced MPV
-UninstallDisplayIcon={app}\host\enhanced-mpv-host.exe
+UninstallDisplayIcon={app}\assets\enhanced-mpv.ico
 CloseApplications=no
 RestartApplications=no
 SetupLogging=yes
@@ -58,14 +58,17 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Files]
 ; --- offline payload (everything except mpv / yt-dlp) ----------------------
 Source: "staging\host\enhanced-mpv-host.exe"; DestDir: "{app}\host"; Flags: ignoreversion
-Source: "staging\extension\*"; DestDir: "{app}\extension"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "staging\onboarding\*"; DestDir: "{app}\onboarding"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "staging\browser-extension\*"; DestDir: "{app}\browser-extension"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "staging\native-host\*"; DestDir: "{app}\native-host"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "staging\scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "extension-key.pem"
+Source: "staging\installer\onboarding\*"; DestDir: "{app}\onboarding"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "staging\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "staging\manifests\*"; DestDir: "{app}\manifests"; Flags: ignoreversion
 Source: "staging\extension-id.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "staging\firefox\enhanced-mpv-firefox.xpi"; DestDir: "{app}\firefox"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "staging\mpv-config\*"; DestDir: "{app}\mpv"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Custom window/taskbar icon
-Source: "..\assets\enhanced-mpv.ico"; DestDir: "{app}\mpv"; Flags: ignoreversion
+Source: "staging\assets\enhanced-mpv.ico"; DestDir: "{app}\mpv"; Flags: ignoreversion
 
 ; --- on-demand dependencies (downloaded into {tmp} when winget is absent) --
 Source: "{tmp}\yt-dlp.exe"; DestDir: "{app}\bin"; Flags: external ignoreversion skipifsourcedoesntexist; Check: WantYtDlpArchiveFile
@@ -85,18 +88,30 @@ Root: HKCU; Subkey: "Software\BraveSoftware\Brave\NativeMessagingHosts\{#HostNam
 Root: HKCU; Subkey: "Software\Mozilla\NativeMessagingHosts\{#HostName}"; ValueType: string; ValueName: ""; ValueData: "{app}\manifests\{#HostName}.firefox.json"; Flags: uninsdeletekey
 
 [Run]
-Filename: "{code:OnboardingUrl}"; Description: "Open the 3-step setup guide"; Flags: postinstall shellexec nowait skipifsilent
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\install.ps1"" -Yes -SkipDeps -ExtensionId ""{#ExtId}"" -OpenOnboarding"; Description: "Finish installing Enhanced MPV and open the setup guide"; Flags: runhidden waituntilterminated
 Filename: "{code:GetChromeExe}"; Parameters: "chrome://extensions"; Description: "Open Chrome extensions page (paste the folder we copied)"; Flags: postinstall nowait skipifsilent; Check: LaunchChrome
 Filename: "{code:GetBraveExe}"; Parameters: "brave://extensions"; Description: "Open Brave extensions page (paste the folder we copied)"; Flags: postinstall nowait skipifsilent; Check: LaunchBrave
 Filename: "{code:GetEdgeExe}"; Parameters: "edge://extensions"; Description: "Open Edge extensions page (paste the folder we copied)"; Flags: postinstall nowait skipifsilent; Check: LaunchEdge
+
+[UninstallRun]
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\install.ps1"" -Uninstall -Yes"; Flags: runhidden waituntilterminated
+
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}\browser-extension"
+Type: filesandordirs; Name: "{app}\native-host"
+Type: filesandordirs; Name: "{app}\scripts"
+Type: filesandordirs; Name: "{app}\assets"
+Type: filesandordirs; Name: "{app}\mpv"
+Type: filesandordirs; Name: "{app}\onboarding"
+Type: filesandordirs; Name: "{app}\host"
+Type: filesandordirs; Name: "{app}\manifests"
+Type: filesandordirs; Name: "{app}\firefox"
 
 [Code]
 const
   CHostName = '{#HostName}';
   CGeckoId = '{#GeckoId}';
   CExtId = '{#ExtId}';
-  CModernZLuaUrl = 'https://github.com/Samillion/ModernZ/releases/latest/download/modernz.lua';
-  CModernZFontUrl = 'https://github.com/Samillion/ModernZ/releases/latest/download/modernz-icons.ttf';
   CRceditUrl = 'https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe';
 
 var
@@ -148,7 +163,7 @@ function OnboardingUrl(Param: String): String;
 var
   ExtPath: String;
 begin
-  ExtPath := ExpandConstant('{app}\extension');
+  ExtPath := ExpandConstant('{app}\browser-extension');
   Result := ExpandConstant('{app}\onboarding\index.html') + '?extPath=' + UrlEncodeComponent(ExtPath);
 end;
 
@@ -477,6 +492,8 @@ var
   MpvUrl: String;
 begin
   DownloadPage.Clear;
+  WantModernZLua := False;
+  WantModernZFont := False;
   if WantYtDlpArchive then
     DownloadPage.Add('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe',
       'yt-dlp.exe', '');
@@ -494,12 +511,7 @@ begin
         Log('Could not resolve a mpv release asset; skipping mpv download.');
     end;
   end;
-  if WantModernZLua then
-    DownloadPage.Add(CModernZLuaUrl, 'modernz.lua', '');
-  if WantModernZFont then
-    DownloadPage.Add(CModernZFontUrl, 'modernz-icons.ttf', '');
-
-  if (not WantYtDlpArchive) and (not WantMpvArchive) and (not WantModernZLua) and (not WantModernZFont) then
+  if (not WantYtDlpArchive) and (not WantMpvArchive) then
     Exit;
 
   DownloadPage.Show;
@@ -521,8 +533,6 @@ begin
 // Tie the install-time file checks to what actually landed on disk.
   WantYtDlpArchive := WantYtDlpArchive and FileExists(ExpandConstant('{tmp}\yt-dlp.exe'));
   WantMpvArchive := WantMpvArchive and FileExists(ExpandConstant('{tmp}\mpv.7z'));
-  WantModernZLua := WantModernZLua and FileExists(ExpandConstant('{tmp}\modernz.lua'));
-  WantModernZFont := WantModernZFont and FileExists(ExpandConstant('{tmp}\modernz-icons.ttf'));
 end;
 
 // -------------------------------------------------------------- file utils --
@@ -977,7 +987,7 @@ var
   ResultCode: Integer;
   P: String;
 begin
-  P := ExpandConstant('{app}\extension');
+  P := ExpandConstant('{app}\browser-extension');
   Exec(ExpandConstant('{cmd}'),
     '/c powershell -NoProfile -Command "Set-Clipboard -Value ''' + P + '''"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -1101,8 +1111,9 @@ begin
 // Mirror install.ps1: skip ModernZ only when both assets already exist
 // (either already deployed to the user mpv dir, or bundled offline in
 // app}\mpv from the staging payload).
-    WantModernZLua := not ((FileExists(ExpandConstant('{userappdata}\mpv\scripts\modernz.lua')) and FileExists(ExpandConstant('{userappdata}\mpv\fonts\modernz-icons.ttf'))) or (FileExists(ExpandConstant('{app}\mpv\scripts\modernz.lua')) and FileExists(ExpandConstant('{app}\mpv\fonts\modernz-icons.ttf'))));
-    WantModernZFont := not ((FileExists(ExpandConstant('{userappdata}\mpv\fonts\modernz-icons.ttf'))) or (FileExists(ExpandConstant('{app}\mpv\fonts\modernz-icons.ttf'))));
+    // The ModernZ script and font are mandatory staged payloads, never a live download.
+    WantModernZLua := False;
+    WantModernZFont := False;
 
     ProgressPage.SetProgress(50, 100);
     ProgressPage.SetText('Fetching missing pieces', '');
@@ -1110,7 +1121,7 @@ begin
     ProgressPage.Hide;
   end;
 
-  if WantMpvArchive or WantYtDlpArchive or WantModernZLua or WantModernZFont then
+  if WantMpvArchive or WantYtDlpArchive then
     DownloadDeps;
 end;
 
@@ -1148,8 +1159,6 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
   begin
-    DeployMpvConfig;
-    DeployModernZ;
     WriteNativeManifests;
     FinalizeDeps;
     WriteDefaultConfig;

@@ -61,6 +61,9 @@ async function waitForRelayReady(masterRelayUrl) {
 test.afterEach(() => {
   for (const [, relay] of activeRelays.entries()) {
     try {
+      if (typeof relay.server.closeAllConnections === "function") {
+        relay.server.closeAllConnections();
+      }
       relay.server.close();
     } catch {
       // ignore
@@ -437,7 +440,20 @@ test("startRelay rewrites nested variant playlists so their segments use the rel
     const seg = await (await fetch(segLine)).text();
     assert.strictEqual(seg, "SEGMENT");
     assert.ok(seen.every((s) => s.referer === "https://site.example/"), "every upstream request carries the tab headers");
+    const tokenMatch = relayUrl.match(/\/([a-f0-9]+)\/index\.m3u8/);
+    if (tokenMatch) {
+      stopRelay(tokenMatch[1]);
+    }
   } finally {
+    try {
+      if (typeof upstream.closeAllConnections === "function") {
+        upstream.closeAllConnections();
+      }
+    } catch { /* ignore */ }
     upstream.close();
   }
+});
+
+test.after(() => {
+  setTimeout(() => process.exit(0), 50).unref();
 });

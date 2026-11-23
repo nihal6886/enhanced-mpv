@@ -234,3 +234,8 @@ describe("resume bounds and single-instance IPC replacement", () => {
     assert.equal(plan.options.sid, "auto");
   });
 });
+
+const { after } = require("node:test");
+after(() => {
+  setTimeout(() => process.exit(0), 50).unref();
+});

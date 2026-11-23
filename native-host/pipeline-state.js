@@ -21,10 +21,12 @@ const StageOrder = [
 ];
 
 function canTransition(from, to) {
+  if (to === PipelineStage.IDLE || to === PipelineStage.FAILOVER) return true;
+  if (from === PipelineStage.IDLE || from === PipelineStage.FAILOVER) return true;
   const fromIdx = StageOrder.indexOf(from);
   const toIdx = StageOrder.indexOf(to);
   if (fromIdx === -1 || toIdx === -1) return false;
-  return toIdx >= fromIdx || to === PipelineStage.FAILOVER || to === PipelineStage.IDLE;
+  return toIdx >= fromIdx;
 }
 
 function createInitialPipelineState() {

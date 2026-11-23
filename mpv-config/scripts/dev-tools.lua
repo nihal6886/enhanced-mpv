@@ -3,128 +3,8 @@
 
   Live Stream & Sniffer Inspector HUD for Enhanced MPV.
   Bound to Ctrl+Shift+D. Renders a sleek #0D1117 + #4ADE80 overlay showing:
-  - WebSocket Bridge status (REAL-TIME WS / DISCONNECTED)
-  - Live candidate stream count from sniffer
-  - Active candidate (idx/total), stream type (HLS/DASH/DIRECT/YTDLP)
-  - Resolved URL vs local relay URL
-  - Forwarded headers (Referer, Origin, Cookie, User-Agent, Authorization status)
-  - Video/audio codec & resolution
-  - Demuxer cache seconds
-  - Recent IPC/demuxer errors
-  - Live player telemetry (time-pos, pause, resolution, buffering)
-]]
-
-local mp = require("mp")
-local utils = require("mp.utils")
-local msg = require("mp.msg")
-
-local NEON_GREEN = "4ADE80"
-local DARK_BG = "0D1117"
-local DARK_CARD = "161B22"
-local TEXT_WHITE = "E6EDF3"
-local TEXT_MUTED = "8B949E"
-local BORDER_COLOR = "30363D"
-local GREEN_DIM = "2D5A43"
-local RED = "FF453A"
-local ORANGE = "FFA500"
-
-local overlay = mp.create_osd_overlay("ass-events")
-local visible = false
-local candidate_idx = 1
-local candidates = {}
-local stream_info = {}
-local last_errors = {}
-local bridge_status = { connected = false, candidate_count = 0, last_update = 0 }
-local player_telemetry = { time_pos = 0, pause = false, width = 0, height = 0, demuxer_cache = 0, media_title = "" }
-
-local function safe_ass(text)
-  return tostring(text or ""):gsub("[\r\n]+", " "):gsub("{", "("):gsub("}", ")")
-end
-
-local function ass_rgb(rgb)
-  return string.format("&H%s&", rgb)
-end
-
-local function ass_alpha(alpha)
-  return string.format("&H%02X&", alpha)
-end
-
-local function get_stream_type(url)
-  if not url or url == "" then return "UNKNOWN" end
-  local u = url:lower()
-  if u:match("ytdlp") or u:match("youtube%.com") or u:match("youtu%.be") or u:match("googlevideo%.com") then
-    return "YTDLP"
-  elseif u:match("%.m3u8") or u:match("%.m3u") then
-    return "HLS"
-  elseif u:match("%.mpd") then
-    return "DASH"
-  elseif u:match("%.mp4") or u:match("%.mkv") or u:match("%.webm") then
-    return "DIRECT"
-  elseif u:match("127%.0%.0%.1") or u:match("localhost") then
-    return "RELAY"
-  end
-  return "OTHER"
-end
-
-local function parse_sources_json()
-  local p = mp.command_native({ "expand-path", "~/.enhanced-mpv/sources.json" })
-  if not p or p == "" then return nil end
-  local f = io.open(p, "r")
-  if not f then return nil end
-  local content = f:read("*a")
-  f:close()
-  local ok, parsed = pcall(utils.parse_json, content)
-  if not ok or type(parsed) ~= "table" then return nil end
-  return parsed
-end
-
-local function update_candidates()
-  local src = parse_sources_json()
-  if src and src.candidates and #src.candidates > 0 then
-    candidates = src.candidates
-    if candidate_idx > #candidates then candidate_idx = 1 end
-  else
-    candidates = {}
-    candidate_idx = 1
-  end
-end
-
-local function get_stream_info()
-  local info = {}
-  info.path = mp.get_property("path") or ""
-  info.stream_type = get_stream_type(info.path)
-  info.video_codec = mp.get_property("video-codec") or "N/A"
-  info.audio_codec = mp.get_property("audio-codec") or "N/A"
-  info.width = mp.get_property_number("width") or 0
-  info.height = mp.get_property_number("height") or 0
-  info.fps = mp.get_property_number("container-fps") or 0
-  info.demuxer_cache = mp.get_property_number("demuxer-cache-duration") or 0
-  info.cache_buffering = mp.get_property_number("cache-buffering-state") or 0
-  info.idle_active = mp.get_property_bool("idle-active")
-  info.pause = mp.get_property_bool("pause")
-  info.time_pos = mp.get_property_number("time-pos") or 0
-  info.duration = mp.get_property_number("duration") or 0
-  info.http_headers = mp.get_property("http-header-fields") or ""
-  return info
-end
-
-local function add_error(source, message)
-  table.insert(last_errors, 1, string.format("[%s] %s", source, message))
-  if #last_errors > 5 then table.remove(last_errors) end
-end
-
-mp.register_script_message("dev-tools-error", function(source, message)
-  add_error(source, message)
-  if visible then render() end
-end)
-
---[[
-  dev-tools.lua
-
-  Live Stream & Sniffer Inspector HUD for Enhanced MPV.
-  Bound to Ctrl+Shift+D. Renders a sleek #0D1117 + #4ADE80 overlay showing:
   - Unified PipelineState (SNIFFING -> PROBING -> PREWARMING -> SHADOW_READY -> LAUNCHING -> PLAYING | FAILOVER)
-  - WebSocket Bridge status (REAL-TIME WS / DISCONNECTED)
+  - Loopback HTTP bridge status (LIVE / OFFLINE)
   - Live candidate stream count from sniffer
   - Active candidate (idx/total), stream type (HLS/DASH/DIRECT/YTDLP)
   - Resolved URL vs local relay URL
@@ -271,6 +151,8 @@ mp.register_script_message("pipeline_state_applied", function(json)
     pipeline_relay_stats = data.relayStats or {}
     pipeline_prewarm_ms = data.prewarmMs or 0
     pipeline_launch_ms = data.launchMs or 0
+    bridge_status.connected = true
+    bridge_status.last_update = mp.get_time()
     if visible then render() end
   end
 end)
@@ -295,7 +177,7 @@ mp.register_script_message("sniffer_state_change", function(json)
   end
 end)
 
--- Receive player telemetry from launch-daemon.js via WebSocket bridge
+-- Receive player telemetry from launch-daemon.js via the loopback HTTP bridge
 mp.register_script_message("player:telemetry", function(json)
   local ok, data = pcall(utils.parse_json, json)
   if ok and data and data.state then
@@ -335,7 +217,7 @@ local function get_pipeline_stage_label(stage)
     SNIFFING = "SNIFFING",
     PROBING = "PROBING",
     PREWARMING = "PREWARMING",
-    SHADOW_READY = "⚡ SHADOW READY",
+    SHADOW_READY = "SHADOW READY",
     LAUNCHING = "LAUNCHING",
     PLAYING = "PLAYING",
     FAILOVER = "FAILOVER",
@@ -364,10 +246,10 @@ local function render()
   table.insert(a, string.format("{\\an7\\pos(%d,%d)\\bord1\\shad0\\1c%s\\3c%s\\alpha&H18&}{\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}",
     x - 10, y - 10, ass_rgb(DARK_BG), ass_rgb(BORDER_COLOR), panel_w + 20, panel_w + 20, panel_h + 20, panel_h + 20))
 
-  -- Title bar with PipelineState + WebSocket bridge status
+  -- Title bar with PipelineState + loopback bridge status
   local pipeline_color = get_pipeline_stage_color(pipeline_stage)
   local pipeline_label = get_pipeline_stage_label(pipeline_stage)
-  local bridge_status_text = bridge_status.connected and "BRIDGE: REAL-TIME WS" or "BRIDGE: DISCONNECTED"
+  local bridge_status_text = bridge_status.connected and "BRIDGE: LOOPBACK LIVE" or "BRIDGE: OFFLINE"
   local bridge_status_color = bridge_status.connected and NEON_GREEN or RED
   local bridge_candidates = bridge_status.candidate_count > 0 and ("  |  CANDIDATES: " .. bridge_status.candidate_count) or ""
   
@@ -394,7 +276,7 @@ local function render()
   -- PipelineState row
   local prewarm_str = pipeline_prewarm_ms > 0 and string.format("  (prewarm: %.0fms)", pipeline_prewarm_ms) or ""
   local launch_str = pipeline_launch_ms > 0 and string.format("  (launch: %.0fms)", pipeline_launch_ms) or ""
-  local zw_str = zero_wait_ready and "  ⚡ ZERO-WAIT" or ""
+  local zw_str = zero_wait_ready and "  ZERO-WAIT" or ""
   add_row("Pipeline:", string.format("%s%s%s%s", pipeline_label, prewarm_str, launch_str, zw_str), pipeline_color, true)
 
   -- RAM Segment Ring stats
@@ -456,7 +338,7 @@ local function render()
     x + 16, row_y, ass_rgb(NEON_GREEN)))
   row_y = row_y + row_h
 
-  -- Use live telemetry from WebSocket bridge if available, fall back to local properties
+  -- Use live telemetry from the loopback bridge if available, fall back to local properties
   local live_time_pos = player_telemetry.time_pos or stream_info.time_pos
   local live_pause = player_telemetry.pause ~= nil and player_telemetry.pause or stream_info.pause
   local live_width = player_telemetry.width or stream_info.width
@@ -541,4 +423,4 @@ mp.observe_property("demuxer-error", "native", function(_, val)
   if val and val ~= "" then add_error("DEMUXER", val) end
 end)
 
-msg.info("dev-tools.lua loaded (Ctrl+Shift+D to toggle) - WebSocket Bridge Status Enabled")
+msg.info("dev-tools.lua loaded (Ctrl+Shift+D to toggle) - Loopback Bridge Status Enabled")

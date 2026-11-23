@@ -21,8 +21,7 @@ param(
   [string]$PkgTarget = "node22-win-x64",
   [string]$PkgPackage = "@yao-pkg/pkg",
   [switch]$SkipPkg,
-  [switch]$SkipExtension,
-  [switch]$SkipLua
+  [switch]$SkipExtension
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,36 +31,14 @@ $Dist = Join-Path $Root "dist"
 $Stage = Join-Path $Root "installer\staging"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
-$ModernZLuaUrl = "https://github.com/Samillion/ModernZ/releases/latest/download/modernz.lua"
-$ModernZFontUrl = "https://github.com/Samillion/ModernZ/releases/latest/download/modernz-icons.ttf"
-$ThumbfastUrl = "https://github.com/po5/thumbfast/archive/refs/heads/master.zip"
-$SubSelectUrl = "https://github.com/CogentRedTester/mpv-sub-select/archive/refs/heads/master.zip"
-
-# Local paths to vendor ModernZ assets from (if already installed)
-$LocalModernZLua = Join-Path $env:APPDATA "mpv\scripts\modernz.lua"
-$LocalModernZFont = Join-Path $env:APPDATA "mpv\fonts\modernz-icons.ttf"
-
 function Write-Step($Message) { Write-Host "==> $Message" -ForegroundColor Cyan }
 function Ensure-Dir($Path) { New-Item -ItemType Directory -Force -Path $Path | Out-Null }
 function Reset-Dir($Path) { if (Test-Path $Path) { Remove-Item $Path -Recurse -Force }; Ensure-Dir $Path }
-
-function Download-File($Url, $Destination) {
-  Ensure-Dir (Split-Path -Parent $Destination)
-  $tmp = "$Destination.part"
-  try {
-    Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 -Uri $Url -OutFile $tmp
-    Move-Item -Force $tmp $Destination
-    return $true
-  } catch {
-    Write-Warning "Download failed: $Url ($($_.Exception.Message))"
-    if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
-    return $false
-  }
-}
-
-function Expand-ZipTo($Zip, $Destination) {
-  Reset-Dir $Destination
-  Expand-Archive -Path $Zip -DestinationPath $Destination -Force
+function Copy-Tree($Source, $Destination, [string[]]$ExcludeNames = @()) {
+  if (-not (Test-Path $Source -PathType Container)) { throw "Required source tree missing: $Source" }
+  Ensure-Dir $Destination
+  Get-ChildItem -LiteralPath $Source -Force | Where-Object { $_.Name -notin $ExcludeNames } |
+    ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $Destination -Recurse -Force }
 }
 
 # Chrome derives an unpacked extension's id from the SHA-256 of the DER(SPKI)
@@ -91,6 +68,10 @@ Write-Step "Resetting dist\ and installer\staging\"
 Reset-Dir $Dist
 Reset-Dir $Stage
 
+Write-Step "Generating release icons and wizard artwork"
+& node (Join-Path $Root "scripts\generate-icons.js")
+if ($LASTEXITCODE -ne 0) { throw "generate-icons.js failed" }
+
 # 1. Browser extension --------------------------------------------------------
 if (-not $SkipExtension) {
   Write-Step "Packaging browser extension"
@@ -98,8 +79,7 @@ if (-not $SkipExtension) {
   if ($LASTEXITCODE -ne 0) { throw "package-extension.js failed" }
 }
 
-Ensure-Dir (Join-Path $Stage "extension")
-Copy-Item (Join-Path $Root "browser-extension\*") (Join-Path $Stage "extension") -Recurse -Force
+Copy-Tree (Join-Path $Root "browser-extension") (Join-Path $Stage "browser-extension")
 
 Ensure-Dir (Join-Path $Stage "firefox")
 $FirefoxXpi = Join-Path $Dist "enhanced-mpv-firefox.xpi"
@@ -126,19 +106,13 @@ if (Test-Path $HostExe) {
   throw "dist\enhanced-mpv-host.exe not found; run without -SkipPkg."
 }
 
-# 3. mpv-config + lightweight Lua UI scripts ----------------------------------
+# 3. Complete mpv-config / dark-studio UI stack -------------------------------
 Write-Step "Staging mpv-config"
 $MpvStage = Join-Path $Stage "mpv-config"
 Reset-Dir $MpvStage
 Copy-Item (Join-Path $Root "mpv-config\*") $MpvStage -Recurse -Force
 $MpvScripts = Join-Path $MpvStage "scripts"
 Ensure-Dir $MpvScripts
-foreach ($legacy in @(
-    (Join-Path $MpvStage "mpvnet.conf"),
-    (Join-Path $MpvStage "script-opts\uosc.conf")
-  )) {
-  if (Test-Path $legacy) { Remove-Item $legacy -Force }
-}
 
 # 3b. Player icon -------------------------------------------------------------
 # Staged twice: at staging\assets for SetupIconFile and inside the mpv config
@@ -148,67 +122,35 @@ Ensure-Dir (Join-Path $Stage "assets")
 Copy-Item (Join-Path $Root "assets\enhanced-mpv.ico") (Join-Path $Stage "assets") -Force
 Copy-Item (Join-Path $Root "assets\enhanced-mpv.ico") (Join-Path $MpvStage "enhanced-mpv.ico") -Force
 
-if (-not $SkipLua) {
-  Write-Step "Bundling ModernZ / thumbfast / mpv-sub-select offline"
-  $tmp = Join-Path $env:TEMP ("empv-build-" + [guid]::NewGuid().ToString("N"))
-  Ensure-Dir $tmp
-  try {
-    # ModernZ assets: prefer local copies from %APPDATA%\mpv (installed by setup.ps1),
-    # fall back to GitHub release download. This avoids CI rate limits and ensures
-    # the exact same version the user has installed gets bundled.
-    $modernZFonts = Join-Path $MpvStage "fonts"
-    Ensure-Dir $modernZFonts
-    
-    # modernz.lua
-    $modernZLuaDest = Join-Path $MpvScripts "modernz.lua"
-    if (Test-Path $LocalModernZLua) {
-      Write-Step "Vendoring ModernZ Lua from local install"
-      Copy-Item $LocalModernZLua $modernZLuaDest -Force
-    } elseif (-not (Download-File $ModernZLuaUrl $modernZLuaDest)) {
-      throw "Could not download the latest ModernZ Lua release."
-    }
-    
-    # modernz-icons.ttf
-    $modernZFontDest = Join-Path $modernZFonts "modernz-icons.ttf"
-    if (Test-Path $LocalModernZFont) {
-      Write-Step "Vendoring ModernZ font from local install"
-      Copy-Item $LocalModernZFont $modernZFontDest -Force
-    } elseif (-not (Download-File $ModernZFontUrl $modernZFontDest)) {
-      throw "Could not download the ModernZ icon font."
-    }
-
-    # thumbfast
-    $thZip = Join-Path $tmp "thumbfast.zip"
-    $thOut = Join-Path $tmp "thumbfast"
-    if (Download-File $ThumbfastUrl $thZip) {
-      Expand-ZipTo $thZip $thOut
-      $lua = Get-ChildItem $thOut -Recurse -Filter "thumbfast.lua" -ErrorAction SilentlyContinue | Select-Object -First 1
-      if ($lua) { Copy-Item $lua.FullName (Join-Path $MpvScripts "thumbfast.lua") -Force }
-    }
-
-    # mpv-sub-select
-    $ssZip = Join-Path $tmp "subselect.zip"
-    $ssOut = Join-Path $tmp "subselect"
-    if (Download-File $SubSelectUrl $ssZip) {
-      Expand-ZipTo $ssZip $ssOut
-      $lua = Get-ChildItem $ssOut -Recurse -Filter "sub-select.lua" -ErrorAction SilentlyContinue | Select-Object -First 1
-      if (-not $lua) {
-        $lua = Get-ChildItem $ssOut -Recurse -Filter "*.lua" -ErrorAction SilentlyContinue |
-          Where-Object { $_.Directory.Name -notlike "*scripts*" } | Select-Object -First 1
-      }
-      if ($lua) { Copy-Item $lua.FullName (Join-Path $MpvScripts "sub-select.lua") -Force }
-    }
-  } finally {
-    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-  }
+foreach ($required in @(
+    "mpv.conf", "input.conf", "script-opts\modernz.conf", "script-opts\thumbfast.conf",
+    "fonts\modernz-icons.ttf", "scripts\window-icon.lua", "scripts\loading-screen.lua",
+    "scripts\player-menus.lua", "scripts\stream-controller.lua", "scripts\dev-tools.lua",
+    "scripts\modernz.lua", "scripts\thumbfast.lua", "scripts\sub-select.lua"
+  )) {
+  $path = Join-Path $MpvStage $required
+  if (-not (Test-Path $path -PathType Leaf)) { throw "Required mpv UI asset missing from repository: $path" }
 }
 
+Copy-Tree (Join-Path $Root "native-host") (Join-Path $Stage "native-host") @("extension-key.pem")
+Copy-Tree (Join-Path $Root "scripts") (Join-Path $Stage "scripts") @("extension-key.pem")
+Copy-Tree (Join-Path $Root "installer\onboarding") (Join-Path $Stage "installer\onboarding")
+Copy-Tree (Join-Path $Root "assets") (Join-Path $Stage "assets")
+foreach ($asset in @("enhanced-mpv.ico", "wizard-banner.bmp", "wizard-small.bmp")) {
+  if (-not (Test-Path (Join-Path $Stage "assets\$asset") -PathType Leaf)) {
+    throw "Required installer artwork is missing: $asset"
+  }
+}
 # 4. Onboarding page + Native Messaging templates -----------------------------
 Write-Step "Staging onboarding page and Native Messaging templates"
 Ensure-Dir (Join-Path $Stage "onboarding")
 Copy-Item (Join-Path $Root "installer\onboarding\*") (Join-Path $Stage "onboarding") -Recurse -Force
 Ensure-Dir (Join-Path $Stage "manifests")
 Copy-Item (Join-Path $Root "native-host\manifests\*") (Join-Path $Stage "manifests") -Force
+foreach ($temporary in @("stage-chrome", "stage-firefox")) {
+  $temporaryPath = Join-Path $Dist $temporary
+  if (Test-Path $temporaryPath) { Remove-Item $temporaryPath -Recurse -Force }
+}
 
 # 5. Stable extension id ------------------------------------------------------
 $extId = Get-ExtensionId
@@ -220,6 +162,32 @@ if ($extId) {
 }
 
 # 6. Report -------------------------------------------------------------------
+ $isccCommand = Get-Command iscc.exe -ErrorAction SilentlyContinue
+if (-not $isccCommand) {
+  $isccPaths = @(
+    (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+    (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
+  )
+  $isccCommand = $isccPaths | Where-Object { Test-Path $_ -PathType Leaf } | Select-Object -First 1
+}
+if ($isccCommand) {
+  Write-Step "Compiling installer\setup.iss"
+  $iscc = if ($isccCommand -is [string]) { $isccCommand } else { $isccCommand.Source }
+  & $iscc "/DExtId=$extId" (Join-Path $Root "installer\setup.iss")
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $Dist "EnhancedMPV-Setup.exe"))) {
+    throw "Inno Setup compilation failed."
+  }
+} else {
+  Write-Warning "Inno Setup is not installed; EnhancedMPV-Setup.exe was not compiled."
+}
+
+$sumLines = Get-ChildItem $Dist -File -Recurse | Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
+  Sort-Object FullName | ForEach-Object {
+    $relative = $_.FullName.Substring($Dist.TrimEnd('\').Length + 1).Replace("\", "/")
+    "{0} *{1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $relative
+  }
+[System.IO.File]::WriteAllLines((Join-Path $Dist "SHA256SUMS.txt"), [string[]]$sumLines, $Utf8NoBom)
+
 Write-Step "Artifacts in dist\"
 Get-ChildItem $Dist -File | ForEach-Object { "{0,10:N0}  {1}" -f $_.Length, $_.Name }
 $hostSize = if (Test-Path $HostExe) { (Get-Item $HostExe).Length } else { 0 }

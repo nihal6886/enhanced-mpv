@@ -696,7 +696,7 @@ function promoteToMaster(tabId, videoUrl, masterUrl, text, headers) {
   };
   state.videos.sort((a, b) => b.score - a.score);
   persist(tabId);
-  
+
   const video = state.videos[idx];
   void prewarmStream(videoUrl, headers, video.audioUrl || null, video.audioHeaders || null, state.page.title || "", {
     candidateId: video.id || videoUrl,
@@ -704,7 +704,7 @@ function promoteToMaster(tabId, videoUrl, masterUrl, text, headers) {
     startTime: video.currentTime || 0,
     verified: video.verified === true,
   });
-  
+
   return true;
 }
 
@@ -883,76 +883,84 @@ function scoreStreamCandidate(url, headers, tabId, allVideos = [], audioStreams 
 
 const livenessCache = new Map();
 const LIVENESS_PROBE_TIMEOUT_MS = 1500;
+const LIVENESS_MAX_PARALLEL = 3;
+const LIVENESS_MAX_BYTES = 2048;
 
-async function probeLivenessParallel(urls) {
+async function probeLivenessParallel(candidates) {
   const results = new Map();
-  const promises = urls.map(async (url) => {
-    if (livenessCache.has(url)) return { url, ...livenessCache.get(url) };
-    try {
+  const queue = candidates.map(c => c && c.url ? c : null).filter(Boolean);
+  let next = 0;
+  async function worker() {
+    while (next < queue.length) {
+      const candidate = queue[next++];
+      const url = candidate.url;
+      if (livenessCache.has(url)) {
+        results.set(url, { url, ...livenessCache.get(url) });
+        continue;
+      }
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), LIVENESS_PROBE_TIMEOUT_MS);
-      const res = await fetch(url, {
-        method: "HEAD",
-        credentials: "include",
-        signal: controller.signal,
-        headers: { "Accept": "*/*" },
-      });
-      clearTimeout(timeout);
-      const ct = res.headers.get("content-type") || "";
-      const isHtml = ct.includes("text/html");
-      let verified = false;
-      let mediaSig = false;
-      if (res.ok && !isHtml) {
-        // Try GET first 2KB for media signatures
-        try {
-          const getRes = await fetch(url, {
-            method: "GET",
-            credentials: "include",
-            headers: { "Range": "bytes=0-2047" },
-            signal: AbortSignal.timeout(LIVENESS_PROBE_TIMEOUT_MS),
-          });
-          const buf = await getRes.arrayBuffer();
-          const text = new TextDecoder("utf-8", { fatal: false }).decode(buf);
-          mediaSig = text.includes("#EXTM3U") || text.includes("#EXT-X-STREAM-INF") || 
-                     text.includes("#EXTINF") || text.includes("<MPD") || 
-                     new Uint8Array(buf)[0] === 0x00 && new Uint8Array(buf)[4] === 0x66 && new Uint8Array(buf)[5] === 0x74 && new Uint8Array(buf)[6] === 0x79 && new Uint8Array(buf)[7] === 0x70; // ftyp
-          verified = getRes.ok && mediaSig;
-        } catch {
-          verified = res.ok && !isHtml;
+      try {
+        const headers = { "Accept": "*/*" };
+        for (const [name, value] of Object.entries(candidate.headers || {})) {
+          if (/^(accept|range|authorization|x-[\w-]+)$/i.test(name) && typeof value === "string") headers[name] = value;
         }
+        const res = await fetch(url, { method: "GET", credentials: "include", signal: controller.signal,
+          headers: { ...headers, Range: "bytes=0-2047" } });
+        const isHtml = (res.headers.get("content-type") || "").toLowerCase().includes("text/html");
+        let bytes = new Uint8Array(0);
+        if (res.body && !isHtml) {
+          const reader = res.body.getReader();
+          const chunks = [];
+          let size = 0;
+          while (size < LIVENESS_MAX_BYTES) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = value.subarray(0, LIVENESS_MAX_BYTES - size);
+            chunks.push(chunk);
+            size += chunk.length;
+            if (chunk.length < value.length) break;
+          }
+          if (size >= LIVENESS_MAX_BYTES) await reader.cancel().catch(() => {});
+          bytes = new Uint8Array(size);
+          let offset = 0;
+          for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+        }
+        const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+        const mediaSig = text.includes("#EXTM3U") || text.includes("#EXT-X-STREAM-INF") ||
+          text.includes("#EXTINF") || text.includes("<MPD") ||
+          (bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70);
+        const result = { status: res.status, verified: res.ok && !isHtml && mediaSig, mediaSig, isHtml };
+        livenessCache.set(url, result);
+        results.set(url, { url, ...result });
+      } catch (e) {
+        const result = { status: 0, verified: false, error: String(e) };
+        livenessCache.set(url, result);
+        results.set(url, { url, ...result });
+      } finally {
+        clearTimeout(timeout);
       }
-      const result = { status: res.status, verified, mediaSig, isHtml };
-      livenessCache.set(url, result);
-      if (livenessCache.size > 200) livenessCache.clear(); // simple LRU
-      return { url, ...result };
-    } catch (e) {
-      const result = { status: 0, verified: false, error: String(e) };
-      livenessCache.set(url, result);
-      return { url, ...result };
     }
-  });
-  const settled = await Promise.allSettled(promises);
-  for (const r of settled) {
-    if (r.status === "fulfilled") results.set(r.value.url, r.value);
   }
+  await Promise.all(Array.from({ length: Math.min(LIVENESS_MAX_PARALLEL, queue.length) }, () => worker()));
   return results;
 }
 
 async function enhanceScoresWithLiveness(candidates, _tabId) {
-  const urls = candidates
+  const probes = candidates
     .filter(c => c && c.url && (c.kind === "hls-master" || c.kind === "hls-video-only" || c.kind === "dash" || c.kind === "progressive" || c.url.includes(".m3u8") || c.url.includes(".mpd") || c.url.includes(".mp4") || c.url.includes(".mkv") || c.url.includes(".webm")))
-    .map(c => c.url);
-  if (!urls.length) return candidates;
-  
-  const livenessResults = await probeLivenessParallel(urls);
-  
+    .slice(0, 12);
+  if (!probes.length) return candidates;
+
+  const livenessResults = await probeLivenessParallel(probes);
+
   return candidates.map(c => {
     const liveness = livenessResults.get(c.url);
     if (!liveness) return c;
-    
+
     let newScore = c.score;
     let newVerified = c.verified;
-    
+
     if (liveness.status === 403 || liveness.status === 404) {
       newScore -= 10000; // disqualify
     } else if (liveness.verified) {
@@ -961,12 +969,12 @@ async function enhanceScoresWithLiveness(candidates, _tabId) {
     } else if (liveness.mediaSig) {
       newScore += 2000; // media signature found
     }
-    
+
     // Penalize proxy wrappers when direct stream exists
     if (c.url.includes("/m3u8_proxy/") && candidates.some(other => other.url.includes(c.url.replace("/m3u8_proxy/", "/")) && other.verified)) {
       newScore -= 2500;
     }
-    
+
     return { ...c, score: newScore, verified: newVerified, liveness: { status: liveness.status, verified: liveness.verified, mediaSig: liveness.mediaSig } };
   });
 }
@@ -1423,6 +1431,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return;
     }
+    if (msg.type === "REQUEST_TAB_SCAN") {
+      const id = msg.tabId != null ? msg.tabId : tabId;
+      try {
+        await injectTabContentScripts(id);
+        const state = getState(id);
+        const frameIds = new Set([0]);
+        if (state.frameResources && typeof state.frameResources.keys === "function") {
+          for (const frameId of state.frameResources.keys()) frameIds.add(frameId);
+        }
+        await Promise.all([...frameIds].map((frameId) =>
+          chrome.tabs.sendMessage(id, { type: "scan" }, { frameId }).catch(() => null)
+        ));
+      } catch { /* no content script in this tab */ }
+      persist(id);
+      let pageUrl = getState(id).page.url;
+      try {
+        const t = await chrome.tabs.get(id);
+        if (t && t.url) pageUrl = t.url;
+      } catch { /* tab closed */ }
+      sendResponse(viewState(id, pageUrl));
+      return;
+    }
     if (msg.type === "getState") {
       const id = msg.tabId || tabId;
       let pageUrl = getState(id).page.url;
@@ -1457,25 +1487,62 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return;
     }
     if (msg.type === "player:seek") {
-      sendWsMessage({ type: "extension:seek", timePos: msg.timePos });
+      const endpoint = await getDaemonEndpoint();
+      if (endpoint) {
+        try {
+          await fetch("http://127.0.0.1:" + endpoint.port + "/dispatch", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "X-Enhanced-Mpv-Token": endpoint.token,
+            },
+            body: JSON.stringify({ type: "extension:seek", timePos: msg.timePos }),
+            signal: AbortSignal.timeout(500),
+          });
+        } catch { /* ignore */ }
+      }
       sendResponse({ ok: true });
       return;
     }
     if (msg.type === "player:pause") {
-      sendWsMessage({ type: "extension:pause", paused: msg.paused });
+      const endpoint = await getDaemonEndpoint();
+      if (endpoint) {
+        try {
+          await fetch("http://127.0.0.1:" + endpoint.port + "/dispatch", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "X-Enhanced-Mpv-Token": endpoint.token,
+            },
+            body: JSON.stringify({ type: "extension:pause", paused: msg.paused }),
+            signal: AbortSignal.timeout(500),
+          });
+        } catch { /* ignore */ }
+      }
       sendResponse({ ok: true });
       return;
     }
     if (msg.type === "player:switch-quality") {
-      sendWsMessage({ type: "extension:switch-quality", index: msg.index });
+      const endpoint = await getDaemonEndpoint();
+      if (endpoint) {
+        try {
+          await fetch("http://127.0.0.1:" + endpoint.port + "/dispatch", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "X-Enhanced-Mpv-Token": endpoint.token,
+            },
+            body: JSON.stringify({ type: "extension:switch-quality", index: msg.index }),
+            signal: AbortSignal.timeout(500),
+          });
+        } catch { /* ignore */ }
+      }
       sendResponse({ ok: true });
       return;
     }
     if (msg.type === "bridge:getStatus") {
-      // Return current WebSocket bridge status
-      const wsConnected = wsConnection && wsConnection.readyState === WebSocket.OPEN;
-      const candidateCount = 0; // Could track from cached candidates
-      sendResponse({ connected: wsConnected, candidateCount });
+      // WebSocket bridge removed - return disconnected status
+      sendResponse({ connected: false, candidateCount: 0 });
       return;
     }
     if (msg.type === "native") {
@@ -1745,16 +1812,16 @@ async function buildPayload(tab, url, extra) {
   const rawDuration = hasExtraStart ? Number(extra.duration) : Number(selectedVideo?.duration);
   const startTime = hasExtraStart ? Math.floor(rawStart) : resumeStartTime(rawStart, rawDuration);
   const duration = Number.isFinite(rawDuration) ? rawDuration : 0;
-  
+
   const manifestInfo = selectedVideo?.manifestInfo || null;
   const isVerifiedMaster = selectedVideo?.verified === true && selectedVideo?.kind === "hls-master";
   const masterHasAudio = manifestInfo?.hasAudio === true;
-  
+
   const playUrl = selectedVideo?.playUrl || selected;
 
   let audioUrl = selectedVideo?.audioUrl || null;
   let audioHeaders = null;
-  
+
   const needsSeparateAudio = Boolean(selectedVideo) &&
     selectedVideo.kind !== "hls-master" && !(isVerifiedMaster && masterHasAudio) &&
     (selectedVideo.kind === "hls-video-only" || isVideoOnlyVideo(selectedVideo));
@@ -1773,7 +1840,7 @@ async function buildPayload(tab, url, extra) {
       .filter(a => !(videoFrameId && a.frameId && a.frameId === videoFrameId))
       .sort((a, b) => (b.score || 0) - (a.score || 0));
     const orderedAudio = [...sameFrameAudio, ...otherAudio];
-    
+
     if (orderedAudio.length > 0) {
       const bestAudio = orderedAudio[0];
       audioUrl = bestAudio.url;
@@ -1842,25 +1909,74 @@ function nativeSend(payload) {
   });
 }
 
+function isValidEndpoint(endpoint) {
+  return Boolean(endpoint) &&
+    Number.isInteger(endpoint.port) && endpoint.port > 0 &&
+    typeof endpoint.token === "string" && endpoint.token.length >= 16;
+}
+
+let daemonHealthCache = { port: 0, ok: false, at: 0 };
+
+async function checkDaemonHealth(endpoint, timeoutMs) {
+  if (!isValidEndpoint(endpoint)) return false;
+  const now = Date.now();
+  if (daemonHealthCache.port === endpoint.port && now - daemonHealthCache.at < 2000) {
+    return daemonHealthCache.ok;
+  }
+  let ok = false;
+  try {
+    const res = await fetch("http://127.0.0.1:" + endpoint.port + "/health", {
+      method: "GET",
+      cache: "no-store",
+      signal: AbortSignal.timeout(timeoutMs || 400),
+    });
+    ok = res.ok;
+  } catch {
+    ok = false;
+  }
+  daemonHealthCache = { port: endpoint.port, ok, at: now };
+  return ok;
+}
+
 async function getDaemonEndpoint() {
+  let endpoint = null;
   try {
     const stored = await chrome.storage.local.get([DAEMON_ENDPOINT_KEY]);
-    const endpoint = stored[DAEMON_ENDPOINT_KEY];
-    if (endpoint && Number.isInteger(endpoint.port) && endpoint.port > 0 && typeof endpoint.token === "string") {
-      return endpoint;
-    }
+    endpoint = stored[DAEMON_ENDPOINT_KEY] || null;
   } catch { /* storage unavailable */ }
+
+  if (isValidEndpoint(endpoint) && await checkDaemonHealth(endpoint)) {
+    return endpoint;
+  }
+
+  // Cached port is stale or missing: re-read the real port/token from
+  // daemon.json through the native host, then verify it before using it.
+  try {
+    const res = await nativeSend({ action: "getConfig" });
+    const cfg = res && res.config;
+    const fresh = cfg && Number.isInteger(cfg.daemonPort)
+      ? { port: cfg.daemonPort, token: cfg.daemonToken }
+      : null;
+    if (isValidEndpoint(fresh) && await checkDaemonHealth(fresh)) {
+      await setDaemonEndpoint(fresh);
+      return fresh;
+    }
+  } catch { /* native host unavailable */ }
+
+  if (endpoint) await clearDaemonEndpoint();
   return null;
 }
 
 async function setDaemonEndpoint(endpoint) {
-  if (!endpoint || !Number.isInteger(endpoint.port) || typeof endpoint.token !== "string") return;
+  if (!isValidEndpoint(endpoint)) return;
+  daemonHealthCache = { port: 0, ok: false, at: 0 };
   try {
     await chrome.storage.local.set({ [DAEMON_ENDPOINT_KEY]: endpoint });
   } catch { /* storage unavailable */ }
 }
 
 async function clearDaemonEndpoint() {
+  daemonHealthCache = { port: 0, ok: false, at: 0 };
   try {
     await chrome.storage.local.remove(DAEMON_ENDPOINT_KEY);
   } catch { /* storage unavailable */ }
@@ -1887,281 +2003,77 @@ async function daemonSend(payload, endpoint) {
       await clearDaemonEndpoint();
       return null;
     }
-    if (!response.ok) throw new Error("daemon status " + response.status);
-    return await response.json();
-  } catch {
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) return { ...body, ok: false, error: body.error || ("daemon status " + response.status) };
+    return body;
+  } catch (err) {
     await clearDaemonEndpoint();
-    return null;
+    return { ok: false, error: String(err && err.message || err), code: "DAEMON_REQUEST_FAILED" };
   } finally {
     clearTimeout(timer);
   }
 }
 
 // ============================================================================
-// WebSocket Bridge for Real-Time Bidirectional Communication
+// Stateless HTTP Loopback Communication (replaces WebSocket)
 // ============================================================================
 
-let wsConnection = null;
-let wsReconnectTimer = null;
-let wsReconnectAttempts = 0;
-let wsHeartbeatAlarm = null;
-let wsReconnectInProgress = false; // Guard to prevent concurrent reconnect attempts
-const WS_MAX_RECONNECT_ATTEMPTS = 10;
-const WS_BASE_RECONNECT_DELAY_MS = 1000;
-const WS_MAX_RECONNECT_DELAY_MS = 30000;
-
-// PipelineState from daemon (single source of truth)
-let cachedPipelineState = null;
+// Debounce prewarm offers per tab so repeated sniffer updates stay cheap.
+const lastPrewarmByTab = new Map();
 
 function bgLog(msg) {
-  try { console.log("[" + new Date().toISOString() + "] " + msg); } catch { /* ignore */ }
+  try { console.log('[' + new Date().toISOString() + '] ' + msg); } catch { /* ignore */ }
 }
 
-function connectWebSocket() {
-  if (wsConnection && (wsConnection.readyState === WebSocket.OPEN || wsConnection.readyState === WebSocket.CONNECTING)) {
-    return;
-  }
-  
-  // Always prewarm/spawn daemon first to get a verified fresh endpoint
-  prewarmNative().then((result) => {
-    if (!result || !result.endpoint || !result.endpoint.port) {
-      bgLog("WS: prewarmNative failed, scheduling reconnect");
-      scheduleWsReconnect();
-      return;
-    }
-    
-    const endpoint = result.endpoint;
-    const url = "ws://127.0.0.1:" + endpoint.port + "/ws";
-    
-    try {
-      wsConnection = new WebSocket(url);
-      wsConnection.binaryType = "arraybuffer";
-      
-      wsConnection.onopen = () => {
-        bgLog("WS bridge connected");
-        wsReconnectAttempts = 0;
-        
-        // Register all active tabs
-        for (const [tabId, state] of tabState) {
-          if (state.videos && state.videos.length > 0) {
-            sendWsMessage({
-              type: "extension:register",
-              tabId: tabId
-            });
-            // Send current candidates for this tab
-            const candidates = state.videos
-              .filter(v => isDisplayVideo(v))
-              .map(v => candidateFromVideo(state, v, state.page.title))
-              .filter(Boolean);
-            const qualities = state.videos[0] ? buildQualityTiers(state.videos[0], state.videos[0].manifestInfo) : [];
-            sendWsMessage({
-              type: "extension:candidates-update",
-              tabId: tabId,
-              candidates,
-              qualities
-            });
-          }
-        }
-        
-        // Request current pipeline state
-        sendWsMessage({ type: "pipeline:getState" });
-        
-        // Start heartbeat alarm
-        if (!wsHeartbeatAlarm) {
-          chrome.alarms.create("empv-ws-heartbeat", { periodInMinutes: 0.25 }); // 15 seconds
-          wsHeartbeatAlarm = true;
-        }
-      };
-      
-      wsConnection.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          handleWsMessage(msg);
-        } catch (err) {
-          bgLog("WS parse error: " + err.message);
-        }
-      };
-      
-      wsConnection.onclose = (event) => {
-        // Handle code 1006 (abnormal closure) - daemon likely restarted on new port
-        const isAbnormalClosure = event.code === 1006;
-        if (isAbnormalClosure) {
-          bgLog("WS bridge abnormal closure (1006), clearing stale daemon endpoint");
-          clearDaemonEndpoint().then(() => {
-            // Spawn/discover active daemon via Native Messaging - await completion
-            prewarmNative().then((result) => {
-              if (result && result.endpoint && result.endpoint.port) {
-                bgLog("WS: prewarmNative succeeded after 1006, new port=" + result.endpoint.port);
-              } else {
-                bgLog("WS: prewarmNative failed after 1006");
-              }
-            }).catch(() => {
-              bgLog("WS: prewarmNative error after 1006");
-            });
-          });
-        }
-        bgLog("WS bridge closed: " + event.code + " " + event.reason);
-        wsConnection = null;
-        cachedPipelineState = null;
-        if (wsHeartbeatAlarm) {
-          chrome.alarms.clear("empv-ws-heartbeat");
-          wsHeartbeatAlarm = null;
-        }
-        // Debounced reconnect - only schedule if not already scheduled
-        scheduleWsReconnect();
-      };
-      
-      wsConnection.onerror = (err) => {
-        // Suppress noisy console.error during normal backoff reconnects
-        // Only log if we're not already reconnecting
-        if (!wsReconnectTimer && wsReconnectAttempts === 0) {
-          bgLog("WS bridge error: " + (err && err.message));
-        }
-      };
-    } catch (err) {
-      bgLog("WS connection failed: " + err.message);
-      scheduleWsReconnect();
-    }
-  }).catch((err) => {
-    bgLog("WS prewarm failed: " + err.message);
-    scheduleWsReconnect();
-  });
-}
-
-function scheduleWsReconnect() {
-  if (wsReconnectTimer || wsReconnectInProgress) return;
-  wsReconnectInProgress = true;
-  const delay = Math.min(
-    WS_BASE_RECONNECT_DELAY_MS * Math.pow(2, wsReconnectAttempts) + Math.random() * 1000,
-    WS_MAX_RECONNECT_DELAY_MS
-  );
-  wsReconnectAttempts = Math.min(wsReconnectAttempts + 1, WS_MAX_RECONNECT_ATTEMPTS);
-  wsReconnectTimer = setTimeout(() => {
-    wsReconnectTimer = null;
-    wsReconnectInProgress = false;
-    connectWebSocket();
-  }, delay);
-}
-
-function sendWsMessage(msg) {
-  if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
-    try {
-      wsConnection.send(JSON.stringify(msg));
-      return true;
-    } catch (err) {
-      bgLog("WS send error: " + err.message);
-    }
-  }
-  return false;
-}
-
-function handleWsMessage(msg) {
-  switch (msg.type) {
-    case "player:state":
-      // Forward player telemetry to popup and any listeners
-      if (msg.state) {
-        broadcastPlayerTelemetry(msg.state);
-      }
-      break;
-    case "pipeline:state":
-      // Daemon's unified PipelineState - single source of truth
-      if (msg.payload) {
-        cachedPipelineState = msg.payload;
-        // Broadcast to popup and content scripts
-        broadcastPipelineState(msg.payload);
-      }
-      break;
-    case "sniffer:candidates-updated":
-      // Legacy - now handled via pipeline:state
-      break;
-    case "bridge:status":
-      broadcastBridgeStatus(msg.status);
-      break;
-  }
-}
-
-function broadcastPlayerTelemetry(state) {
-  // Store latest telemetry for popup to read
-  chrome.storage.session.set({ "playerTelemetry": { ...state, timestamp: Date.now() } }).catch(() => {});
-  // Notify popup if open
-  chrome.runtime.sendMessage({ type: "player:telemetry", state }).catch(() => {});
-}
-
-function broadcastPipelineState(pipelineState) {
-  // Store for popup to read
-  chrome.storage.session.set({ "pipelineState": { ...pipelineState, timestamp: Date.now() } }).catch(() => {});
-  // Notify popup if open
-  chrome.runtime.sendMessage({ type: "pipeline:state", payload: pipelineState }).catch(() => {});
-  
-  // Send shadowReady to content scripts for hover pill
-  if (pipelineState.tabId != null) {
-    const ready = pipelineState.stage === "SHADOW_READY";
-    chrome.tabs.sendMessage(pipelineState.tabId, { type: "shadowReady", ready }).catch(() => {});
-    
-    const state = getState(pipelineState.tabId);
-    if (pipelineState.candidate) {
-      // Ensure candidate is in our local videos list
-      const existing = state.videos.find(v => v.url.split("?")[0] === pipelineState.candidate.url.split("?")[0]);
-      if (!existing && pipelineState.candidate.url) {
-        addVideo(pipelineState.tabId, pipelineState.candidate.url, {
-          type: "pipeline",
-          headers: pipelineState.candidate.headers || {},
-          currentTime: pipelineState.startTime || 0,
-        });
-      }
-    }
-  }
-}
-
-function broadcastBridgeStatus(status) {
-  chrome.storage.session.set({ "bridgeStatus": { status, timestamp: Date.now() } }).catch(() => {});
-  chrome.runtime.sendMessage({ type: "bridge:status", status }).catch(() => {});
-}
-
-function sendHeartbeat() {
-  sendWsMessage({ type: "extension:heartbeat", timestamp: Date.now() });
-}
-
-// Listen for heartbeat alarm
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "empv-ws-heartbeat") {
-    sendHeartbeat();
-  }
-});
-
-// Push candidate updates to daemon via WebSocket - drives PipelineState transitions
-function pushCandidatesUpdate(tabId, candidates, qualities) {
+// Push candidate updates to daemon via HTTP /dispatch (stateless)
+async function pushCandidatesUpdate(tabId, candidates, qualities) {
   if (!candidates || !candidates.length) return;
-  
+  const endpoint = await getDaemonEndpoint();
+  if (!endpoint) return;
+
   const topCandidate = candidates[0];
   const isVerified = topCandidate.verified === true;
-  
-  sendWsMessage({
+
+  const payload = {
     type: "extension:candidates-update",
     tabId,
     candidates,
-    qualities
-  });
-  
-  // If we have a verified top candidate and pipeline is in early stage, trigger prewarm
-  if (isVerified && cachedPipelineState) {
-    const stage = cachedPipelineState.stage;
-    if (stage === "SNIFFING" || stage === "PROBING" || stage === "IDLE") {
-      sendWsMessage({
-        type: "extension:candidates-update",
+    qualities,
+  };
+
+  // Use /dispatch for candidate updates (daemon will update PipelineState)
+  try {
+    await fetch("http://127.0.0.1:" + endpoint.port + "/dispatch", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "X-Enhanced-Mpv-Token": endpoint.token,
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(1000),
+    });
+  } catch {
+    // Ignore - daemon will be polled for state
+  }
+
+  // Trigger prewarm for a verified top candidate, debounced per tab/candidate so
+  // repeated sniffer updates do not spam the daemon.
+  if (isVerified) {
+    const key = String(topCandidate.id || topCandidate.url);
+    const previous = lastPrewarmByTab.get(tabId);
+    if (!previous || previous.key !== key || Date.now() - previous.at > 15000) {
+      lastPrewarmByTab.set(tabId, { key, at: Date.now() });
+      void prewarmStream(topCandidate.url, topCandidate.headers || {}, topCandidate.audioUrl || null, topCandidate.audioHeaders || {}, topCandidate.title || "", {
+        candidateId: topCandidate.id,
         tabId,
-        candidates,
-        qualities,
-        // Signal daemon to advance pipeline
-        _triggerPrewarm: true,
-        _candidateId: topCandidate.id,
-        _verified: true,
+        startTime: 0,
+        verified: true,
       });
     }
   }
 }
 
-// Persist tab state to storage and push updates via WebSocket
+// Persist tab state to storage and push updates via HTTP
 async function persist(tabId) {
   const state = getState(tabId);
   try {
@@ -2170,26 +2082,26 @@ async function persist(tabId) {
     await chrome.storage.local.set({ ["tab:" + tabId]: state });
   }
   updateBadge(tabId);
-  
-  // Push candidate updates to daemon via WebSocket
+
+  // Push candidate updates to daemon via HTTP
   const candidates = state.videos
     .filter(v => isDisplayVideo(v))
     .map(v => candidateFromVideo(state, v, state.page.title))
     .filter(Boolean);
   const qualities = state.videos[0] ? buildQualityTiers(state.videos[0], state.videos[0].manifestInfo) : [];
-  
+
   pushCandidatesUpdate(tabId, candidates, qualities);
 }
 
-// Initialize WebSocket connection on startup
+// No WebSocket initialization on startup - stateless HTTP only
 chrome.runtime.onStartup.addListener(() => {
   void prewarmNative().catch(() => {});
-  // Delay WS connection slightly to ensure daemon is ready
-  setTimeout(connectWebSocket, 1000);
+  void injectOpenTabs();
 });
 
 chrome.runtime.onInstalled.addListener(() => {
   void prewarmNative().catch(() => {});
+  void injectOpenTabs();
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: "play-now",
@@ -2207,17 +2119,57 @@ chrome.runtime.onInstalled.addListener(() => {
       contexts: ["link", "video", "audio"],
     }, () => { void chrome.runtime.lastError; });
   });
-  // Connect WS after install
-  setTimeout(connectWebSocket, 1000);
 });
-
-// Also connect when background script loads (for development)
-setTimeout(connectWebSocket, 1000);
 
 async function prewarmNative() {
   const result = await nativeSend({ action: "prewarm" });
-  if (result && result.endpoint) await setDaemonEndpoint(result.endpoint);
+
+  // Log chrome.runtime.lastError if present
+  if (chrome.runtime.lastError) {
+    bgLog("nativeSend lastError: " + chrome.runtime.lastError.message);
+  }
+
+  // Normalize any valid response shape:
+  // 1. { ok: true, port, token, daemon: endpoint }
+  // 2. { ok: true, endpoint: { port, token, ... } }
+  // 3. { ok: true, port, token } (top-level)
+  const ep = (result && result.daemon) || (result && result.endpoint) || (result && result.port ? { port: result.port, token: result.token } : null);
+
+  if (!ep) {
+    bgLog("prewarmNative: no valid endpoint in response: " + JSON.stringify(result));
+    return result;
+  }
+
+  if (ep.port && ep.token) {
+    await setDaemonEndpoint(ep);
+  } else {
+    bgLog("prewarmNative: endpoint missing port or token: " + JSON.stringify(ep));
+  }
   return result;
+}
+
+async function injectTabContentScripts(tabId) {
+  if (!Number.isInteger(tabId) || tabId < 0) return;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      world: "MAIN",
+      files: ["content-extractor.js"],
+    });
+  } catch { /* restricted pages and browser-owned tabs cannot be injected */ }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: ["content.js"],
+    });
+  } catch { /* restricted pages and browser-owned tabs cannot be injected */ }
+}
+
+async function injectOpenTabs() {
+  try {
+    const tabs = await chrome.tabs.query({});
+    await Promise.allSettled(tabs.filter(tab => Number.isInteger(tab.id)).map(tab => injectTabContentScripts(tab.id)));
+  } catch { /* browser startup may not have tabs available yet */ }
 }
 
 async function prewarmStream(videoUrl, videoHeaders, audioUrl, audioHeaders, title, extra = {}) {
@@ -2232,11 +2184,11 @@ async function prewarmStream(videoUrl, videoHeaders, audioUrl, audioHeaders, tit
         "content-type": "application/json",
         "x-enhanced-mpv-token": endpoint.token,
       },
-      body: JSON.stringify({ 
-        videoUrl, 
-        videoHeaders: videoHeaders || {}, 
-        audioUrl: audioUrl || null, 
-        audioHeaders: audioHeaders || {}, 
+      body: JSON.stringify({
+        videoUrl,
+        videoHeaders: videoHeaders || {},
+        audioUrl: audioUrl || null,
+        audioHeaders: audioHeaders || {},
         title: title || "",
         candidateId: extra.candidateId || videoUrl,
         tabId: extra.tabId || 0,
@@ -2288,33 +2240,27 @@ async function launch(tab, url, action, extra) {
   const state = tab ? getState(tab.id) : null;
   if (state) state.lastLaunch = { time: Date.now(), url: payload.url };
   let result = null;
-  
-  // Try WebSocket first for faster response
+
+  // Playback always uses the daemon HTTP bridge. Native Messaging is used to
+  // start/discover the daemon, never as a second cold playback path.
   if (payload.action === "play" || payload.action === "queue") {
-    const wsSent = sendWsMessage({
-      type: "extension:play",
-      url: payload.url,
-      title: payload.title,
-      referer: payload.referer,
-      userAgent: payload.userAgent,
-      cookies: payload.cookies,
-      headers: payload.headers,
-      audioUrl: payload.audioUrl,
-      audioHeaders: payload.audioHeaders,
-      startTime: payload.startTime,
-      candidates: payload.candidates,
-      qualities: payload.qualities
-    });
-    
-    if (wsSent) {
-      // WebSocket sent, wait a bit for response or fall back
-      await new Promise(resolve => setTimeout(resolve, 500));
+    let endpoint = await getDaemonEndpoint();
+    if (!endpoint) {
+      await prewarmNative();
+      endpoint = await getDaemonEndpoint();
     }
-    
-    const endpoint = await getDaemonEndpoint();
     result = await daemonSend(payload, endpoint);
-  }
-  if (!result) {
+    // The daemon can restart between the health check and dispatch. Refresh
+    // its port/token through Native Messaging and retry once before reporting
+    // failure; never turn a stale cached port into a cold playback launch.
+    if (!result || !result.ok) {
+      await clearDaemonEndpoint();
+      await prewarmNative();
+      const refreshed = await getDaemonEndpoint();
+      if (refreshed) result = await daemonSend(payload, refreshed);
+    }
+    if (!result) result = { ok: false, error: "Launch daemon unavailable; check the native host and daemon status.", code: "DAEMON_UNAVAILABLE" };
+  } else {
     result = await nativeSend(payload);
     if (result && result.endpoint) await setDaemonEndpoint(result.endpoint);
   }
@@ -2333,6 +2279,20 @@ async function launch(tab, url, action, extra) {
     }
   }
   return { payload, result };
+}
+
+if (chrome.commands && chrome.commands.onCommand) {
+  chrome.commands.onCommand.addListener(async (command) => {
+    if (command !== "launch-active") return;
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = tabs[0];
+      if (!tab || !tab.id || !tab.url) return;
+      await launch(tab, tab.url, "play", { startTimeSource: "shortcut" });
+    } catch (err) {
+      bgLog("launch-active failed: " + String((err && err.message) || err));
+    }
+  });
 }
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -2371,10 +2331,6 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
     const s = getState(tabId);
     s.page.title = change.title;
   }
-});
-
-chrome.runtime.onStartup.addListener(() => {
-  void prewarmNative().catch(() => {});
 });
 
 chrome.storage.sync.get("extension", (data) => {

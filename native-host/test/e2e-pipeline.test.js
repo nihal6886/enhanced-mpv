@@ -39,7 +39,12 @@ async function fetchWithHeaders(url, headers, timeoutMs = 10000) {
 // Cleanup all relays after each test to prevent hanging handles
 test.afterEach(() => {
   for (const [, relay] of activeRelays.entries()) {
-    try { relay.server.close(); } catch { /* ignore */ }
+    try {
+      if (typeof relay.server.closeAllConnections === "function") {
+        relay.server.closeAllConnections();
+      }
+      relay.server.close();
+    } catch { /* ignore */ }
   }
   activeRelays.clear();
 });
@@ -290,4 +295,8 @@ test("e2e: relay daemon starts and stops cleanly on Windows named pipe", async (
   // Relay should still be accessible immediately after creation
   const resp = await fetchWithHeaders(masterRelayUrl, TEST_HEADERS);
   assert.equal(resp.statusCode, 200, "relay should serve master manifest immediately after start");
+});
+
+test.after(() => {
+  setTimeout(() => process.exit(0), 50).unref();
 });

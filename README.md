@@ -86,10 +86,10 @@ Done. Open any video page and click the extension icon.
 
 mpv never launches on its own when a page starts playing. Every launch is user-triggered, from the toolbar popup's **Launch in Enhanced MPV** button, the `Alt+M` global shortcut, or the optional **hover pill**.
 
-- **Hover pill**: an auto-hiding pill (`#0D1117` + `#4ADE80`) appears at the top-right of active `<video>` elements at least 320 × 180, showing `⚡ SHADOW READY` or `▶ Open in MPV`. It lives in a closed Shadow DOM, so page styles can't touch it.
+- **Hover pill**: an auto-hiding pill (`#0D1117` + `#4ADE80`) appears at the top-right of active `<video>` elements at least 320 × 180, showing `SHADOW READY` or `OPEN IN MPV`. It lives in a closed Shadow DOM, so page styles can't touch it.
 - **Instant bandwidth release (`TAKEOVER_PAUSE`)**: the moment you launch, the tab's `<video>` element is paused and muted. The browser stops downloading duplicate HLS/DASH segments and mpv gets the full connection.
 - **Zero-Wait Shadow Pre-Load**: a hidden standby mpv loads the stream paused while you are still on the page, so the window opens already playing Frame 1 in under 5 ms. See [Architecture](#architecture--pipelinestate).
-- **Fast demuxer and decoder tuning** (`mpv.conf`, `mpv-launcher.js`) for streams that were not preloaded: `--demuxer-lavf-probesize=32768`, `--demuxer-lavf-analyzeduration=0.1`, `--cache-pause-initial=no`, `--initial-audio-sync=no`, and `--hwdec=d3d11va` with an `auto-copy` fallback.
+- **Fast demuxer and decoder tuning** (`mpv.conf`, `mpv-launcher.js`) for streams that were not preloaded: `--demuxer-lavf-probesize=262144`, `--demuxer-lavf-analyzeduration=0.5`, `--cache-pause-initial=no`, `--initial-audio-sync=no`, and `--hwdec=d3d11va` with an `auto-copy` fallback.
 - **Automatic failover**: if the top-ranked stream fails to produce a frame within 1.5 s, the launcher moves to the next candidate without user input.
 
 ### Browser bridge
@@ -97,7 +97,7 @@ mpv never launches on its own when a page starts playing. Every launch is user-t
 - **Site-agnostic stream intelligence** with no hardcoded site hacks. Candidates are ranked by live segment traffic, muxed-master preference, and `yt-dlp` extractor priority (see [Stream selection](#deep-dives)).
 - **In-page extractor** (`content-extractor.js`) that reads YouTube's `adaptiveFormats` straight from page memory in under 1 ms, with no `yt-dlp` cold spawn. The same tiers feed the popup quality dropdown and mpv's `q` / `Shift+Q` menus.
 - **Header preservation** for hotlink-protected and authenticated streams: per-iframe `Referer`, `Origin`, `Cookie`, and `User-Agent` are forwarded on every proxied manifest and segment by `stream-relay.js`.
-- **Live pipeline status** in the popup (stage pill, `⚡ SHADOW READY` badge) and in the player loading screen.
+- **Live pipeline status** in the popup (stage pill, `SHADOW READY` badge) and in the player loading screen.
 - **CSP-clean popup**: `popup.html` loads `popup.js` externally, so DevTools reports zero CSP errors.
 
 ### Subtitles
@@ -125,7 +125,7 @@ flowchart LR
   CE -.->|postMessage| CS
   POP --> BG
   BG -->|"sendNativeMessage length-prefixed JSON"| NH
-  BG <--->|WebSocket bridge| NH
+  BG <--->|loopback HTTP bridge| NH
   NH --> CFG
   MPV --> CFG
   NH -->|"spawn / IPC loadfile"| MPV
@@ -170,7 +170,7 @@ If the sniffer finds a verified working link while mpv is buffering or failing o
 
 - Reads `window.ytInitialPlayerResponse`, `movie_player.getPlayerResponse()`, and `fetch`/`XHR` responses for `/youtubei/v1/player` to extract `streamingData.adaptiveFormats` (all video and audio URLs from `2160p` down to `360p`, plus codecs, bitrates, and title).
 - Hooks `Hls.prototype.loadSource`, `shaka.Player.prototype.load`, `MediaSource.addSourceBuffer`, and the `HTMLMediaElement.src` setter to capture master `.m3u8` / `.mpd` URLs before any segment downloads.
-- Forwards results through `window.postMessage` to the content script, then `background.js`, which merges them into the canonical `StreamCandidate` schema (`{ id, title, url, audioUrl, streamType, headers, audioHeaders, qualities, score, verified }`) and pushes them over the WebSocket bridge as `sniffer:candidates-updated`.
+- Forwards results through `window.postMessage` to the content script, then `background.js`, which merges them into the canonical `StreamCandidate` schema (`{ id, title, url, audioUrl, streamType, headers, audioHeaders, qualities, score, verified }`) and pushes them to the daemon over the loopback HTTP bridge as a candidates-update dispatch.
 
 **Pass B: RAM Segment Ring and standby pre-buffering** (`stream-relay.js`, `launch-daemon.js`, `mpv-launcher.js`):
 
@@ -193,10 +193,10 @@ On the cold path the three setup messages are flushed before `loadfile`, and eac
 
 ### State synchronization
 
-- **WebSocket bridge** (RFC 6455): `background.js` ↔ `launch-daemon.js`, carrying `pipeline:state` events and player telemetry.
+- **Loopback HTTP bridge**: `background.js` ↔ `launch-daemon.js` over `127.0.0.1` (`/health`, `/state`, `/dispatch`, `/play`, `/prewarm-stream`), carrying candidate updates and player state.
 - **Persistent IPC pipe**: `launch-daemon.js` ↔ mpv, carrying `observe_property` events and script messages.
 - **One `PipelineState` event**, `{ stage, candidate, qualities, candidates, relayStats, frameReady, prewarmMs, launchMs }`, consumed by:
-  - `popup.js`: live stage pill, `⚡ SHADOW READY` badge, instant quality selector
+  - `popup.js`: live stage pill, `SHADOW READY` badge, instant quality selector
   - `loading-screen.lua`: 60 fps ASS splash, rendered only when `stage !== "SHADOW_READY"`
   - `stream-controller.lua`: seamless `q` / `Shift+Q` switching, failover, hot-swap
   - `dev-tools.lua`: the `Ctrl+Shift+D` inspector HUD
@@ -282,7 +282,7 @@ Menus use dark studio (`#0D1117`) backgrounds, neon-green (`#4ADE80`) accents, r
 
 | Key | Action |
 |---|---|
-| `Ctrl+Shift+D` | Toggle the **Stream & Sniffer Inspector HUD**: WebSocket bridge status, candidate count, active candidate (idx/total), stream type (HLS/DASH/DIRECT/YTDLP), resolved vs local relay URL, forwarded headers (Referer, Origin, Cookie, User-Agent, Authorization status), codecs and resolution, demuxer cache seconds, recent IPC/demuxer errors, and live telemetry (time-pos, pause, buffering), plus the current `PipelineState` and RAM Ring stats |
+| `Ctrl+Shift+D` | Toggle the **Stream & Sniffer Inspector HUD**: loopback bridge status, candidate count, active candidate (idx/total), stream type (HLS/DASH/DIRECT/YTDLP), resolved vs local relay URL, forwarded headers (Referer, Origin, Cookie, User-Agent, Authorization status), codecs and resolution, demuxer cache seconds, recent IPC/demuxer errors, and live telemetry (time-pos, pause, buffering), plus the current `PipelineState` and RAM Ring stats |
 | `i` | Toggle ModernZ stats overlay |
 | `` ` `` | Toggle ModernZ console |
 
