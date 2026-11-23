@@ -10,7 +10,8 @@
   - Quality tiers (q) and All Working Links (Shift+Q) switching with exact time-pos preservation
   - Emits state updates to loading-screen.lua and dev-tools.lua
   - Single source of truth for current stream state
-  - Consumes unified PipelineState from daemon (SNIFFING -> PROBING -> PREWARMING -> SHADOW_READY -> LAUNCHING -> PLAYING | FAILOVER)
+  - Consumes unified PipelineState from daemon (SNIFFING -> PROBING -> PREWARMING
+    -> SHADOW_READY -> LAUNCHING -> PLAYING | FAILOVER)
 ]]
 
 local mp = require("mp")
@@ -130,12 +131,7 @@ local function load_candidates()
   return false
 end
 
-local function get_current_candidate()
-  if state.current_idx >= 1 and state.current_idx <= #state.candidates then
-    return state.candidates[state.current_idx]
-  end
-  return nil
-end
+
 
 local function find_verified_candidate()
   for i, c in ipairs(state.candidates) do
@@ -380,7 +376,7 @@ mp.register_script_message("stream-controller-load", function(json)
 
     -- If we were probing/failover and now have verified candidates, switch immediately
     if state.failover_armed or state.loading_state == "PROBING" or state.loading_state == "FAILOVER" then
-      local verified_idx, verified_cand = find_verified_candidate()
+      local verified_idx = find_verified_candidate()
       if verified_idx and verified_idx ~= state.current_idx then
         msg.info("stream-controller: verified candidate discovered during failover, switching to " .. verified_idx)
         switch_to_candidate(verified_idx, true)
@@ -429,7 +425,7 @@ mp.register_script_message("enhanced-mpv-sources", function(json)
 
     -- If we were probing/failover and now have verified candidates, switch immediately
     if state.failover_armed or state.loading_state == "PROBING" or state.loading_state == "FAILOVER" then
-      local verified_idx, verified_cand = find_verified_candidate()
+      local verified_idx = find_verified_candidate()
       if verified_idx and verified_idx ~= state.current_idx then
         msg.info("stream-controller: verified candidate discovered during failover, switching to " .. verified_idx)
         switch_to_candidate(verified_idx, true)
@@ -467,7 +463,6 @@ mp.register_script_message("stream-controller-advance", function()
 end)
 
 mp.register_script_message("stream-controller-get-state", function()
-  local cand = get_current_candidate()
   send_state_update("state_response", {
     candidates = state.candidates,
     current_index = state.current_idx,

@@ -45,11 +45,6 @@ local DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 local DWMWA_CAPTION_COLOR = 35
 local DWMWA_BORDER_COLOR = 34
 
--- Foreground focus constants
-local SW_SHOW = 5
-local SW_SHOWNORMAL = 1
-local ATTACH_THREAD_INPUT = 0x00000001
-
 local declared = pcall(function()
   ffi.cdef([[
     void* LoadImageW(void* hInst, const void* name, unsigned int type,
@@ -130,12 +125,6 @@ local function wide(str)
 end
 
 local function pid_of(hwnd)
-  local buf = ffi.new("unsigned long[1]")
-  user32.GetWindowThreadProcessId(ffi.cast("void*", hwnd), buf)
-  return tonumber(buf[0])
-end
-
-local function tid_of(hwnd)
   local buf = ffi.new("unsigned long[1]")
   user32.GetWindowThreadProcessId(ffi.cast("void*", hwnd), buf)
   return tonumber(buf[0])

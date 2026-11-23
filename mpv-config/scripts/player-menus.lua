@@ -196,12 +196,18 @@ local function build_menu_ass(title, items, selected)
   local ass = {}
   local x, y, w, row_h = 70, 90, 620, 40
   local panel_h = 84 + (math.max(1, #items) * row_h)
-  table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\bord1\\shad0\\1c%s\\3c%s\\alpha&H18&}{\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}", x - 18, y - 16, ass_rgb(DARK_BG), ass_rgb(BORDER_COLOR), w, w, panel_h, panel_h))
-  table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs30\\b1\\bord0\\shad0\\1c%s}%s", x, y, ass_rgb(NEON_GREEN), safe_ass_text(title)))
-  table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs16\\bord0\\shad0\\1c%s}%s", x, y + 36, ass_rgb(TEXT_MUTED), "Up/Down or j/k \xC2\xB7 Enter select \xC2\xB7 Esc close"))
+  table.insert(ass, string.format(
+    "{\\an7\\pos(%d,%d)\\bord1\\shad0\\1c%s\\3c%s\\alpha&H18&}{\\p1}" ..
+    "m 0 0 l %d 0 l %d %d l 0 %d{\\p0}",
+     x - 18, y - 16, ass_rgb(DARK_BG), ass_rgb(BORDER_COLOR), w, w, panel_h, panel_h))
+  table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs30\\b1\\bord0\\shad0\\1c%s}%s", x, y,
+     ass_rgb(NEON_GREEN), safe_ass_text(title)))
+  table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs16\\bord0\\shad0\\1c%s}%s", x, y + 36,
+     ass_rgb(TEXT_MUTED), "Up/Down or j/k \xC2\xB7 Enter select \xC2\xB7 Esc close"))
 
   if #items == 0 then
-    table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs22\\bord0\\shad0\\1c%s}No options available", x + 6, y + 68, ass_rgb(TEXT_MUTED)))
+    table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs22\\bord0\\shad0\\1c%s}No options available",
+       x + 6, y + 68, ass_rgb(TEXT_MUTED)))
   end
 
   for i, item in ipairs(items) do
@@ -244,8 +250,12 @@ local function build_menu_ass(title, items, selected)
       end
     end
 
-    table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\bord1\\shad0\\1c%s\\3c%s\\alpha&H10&}{\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}", x - 8, row_y - 4, ass_rgb(bg_color), ass_rgb(border), w - 20, w - 20, row_h - 6, row_h - 6))
-    table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs22\\bord0\\shad0\\1c%s}%s%s", x + 6, row_y + 2, ass_rgb(text_color), prefix, safe_ass_text(display_label)))
+    table.insert(ass, string.format(
+      "{\\an7\\pos(%d,%d)\\bord1\\shad0\\1c%s\\3c%s\\alpha&H10&}{\\p1}" ..
+      "m 0 0 l %d 0 l %d %d l 0 %d{\\p0}",
+       x - 8, row_y - 4, ass_rgb(bg_color), ass_rgb(border), w - 20, w - 20, row_h - 6, row_h - 6))
+    table.insert(ass, string.format("{\\an7\\pos(%d,%d)\\fs22\\bord0\\shad0\\1c%s}%s%s", x + 6,
+       row_y + 2, ass_rgb(text_color), prefix, safe_ass_text(display_label)))
   end
 
   return table.concat(ass, "\n")
@@ -270,7 +280,8 @@ end
 local function unbind_menu_nav()
   if not nav_bound then return end
   nav_bound = false
-  for _, name in ipairs({ "empv-menu-up", "empv-menu-down", "empv-menu-k", "empv-menu-j", "empv-menu-enter", "empv-menu-esc" }) do
+  for _, name in ipairs({ "empv-menu-up", "empv-menu-down", "empv-menu-k", "empv-menu-j", "empv-menu-enter",
+     "empv-menu-esc" }) do
     mp.remove_key_binding(name)
   end
 end
@@ -417,7 +428,8 @@ mp.add_key_binding(nil, "menu-hide", hide_menu)
 
 mp.add_key_binding("Ctrl+Shift+LEFT", "audio-sync-earlier", function() audio_sync_adjust(-50) end)
 mp.add_key_binding("Ctrl+Shift+RIGHT", "audio-sync-later", function() audio_sync_adjust(50) end)
-mp.add_key_binding("Ctrl+Shift+DOWN", "audio-sync-reset", function() mp.set_property_number("audio-delay", 0); mp.osd_message("Audio sync reset", 1.2) end)
+mp.add_key_binding("Ctrl+Shift+DOWN", "audio-sync-reset", function() mp.set_property_number("audio-delay",
+   0); mp.osd_message("Audio sync reset", 1.2) end)
 
 mp.register_script_message("enhanced-mpv-sources", function(raw)
   apply_sources_json(raw)

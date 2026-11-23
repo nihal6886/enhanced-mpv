@@ -55,10 +55,6 @@ local function ass_rgb(rgb)
   return string.format("&H%s&", rgb)
 end
 
-local function ass_alpha(alpha)
-  return string.format("&H%02X&", alpha)
-end
-
 local function get_stream_type(url)
   if not url or url == "" then return "UNKNOWN" end
   local u = url:lower()
@@ -241,7 +237,9 @@ render = function()
   local a = {}
 
   -- Background panel
-  table.insert(a, string.format("{\\an7\\pos(%d,%d)\\bord1\\shad0\\1c%s\\3c%s\\alpha&H18&}{\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}",
+  table.insert(a, string.format(
+    "{\\an7\\pos(%d,%d)\\bord1\\shad0\\1c%s\\3c%s\\alpha&H18&}{\\p1}" ..
+    "m 0 0 l %d 0 l %d %d l 0 %d{\\p0}",
     x - 10, y - 10, ass_rgb(DARK_BG), ass_rgb(BORDER_COLOR), panel_w + 20, panel_w + 20, panel_h + 20, panel_h + 20))
 
   -- Title bar with PipelineState + loopback bridge status
@@ -249,7 +247,8 @@ render = function()
   local pipeline_label = get_pipeline_stage_label(pipeline_stage)
   local bridge_status_text = bridge_status.connected and "BRIDGE: LOOPBACK LIVE" or "BRIDGE: OFFLINE"
   local bridge_status_color = bridge_status.connected and NEON_GREEN or RED
-  local bridge_candidates = bridge_status.candidate_count > 0 and ("  |  CANDIDATES: " .. bridge_status.candidate_count) or ""
+  local bridge_candidates = bridge_status.candidate_count > 0
+    and ("  |  CANDIDATES: " .. bridge_status.candidate_count) or ""
 
   table.insert(a, string.format("{\\an7\\pos(%d,%d)\\fs28\\b1\\bord0\\shad0\\1c%s}STREAM & SNIFFER INSPECTOR  %s%s%s",
     x + 6, y + 6, ass_rgb(NEON_GREEN),
@@ -347,8 +346,10 @@ render = function()
   add_row("Media Title:", safe_ass(live_media_title, "N/A"), TEXT_WHITE)
   add_row("Resolution:", string.format("%dx%d", live_width, live_height), live_width > 0 and NEON_GREEN or TEXT_MUTED)
   add_row("Time Pos:", string.format("%.1fs / %.1fs", live_time_pos, stream_info.duration), TEXT_WHITE)
-  add_row("State:", (stream_info.idle_active and "IDLE" or (live_pause and "PAUSED" or "PLAYING")), live_pause and ORANGE or NEON_GREEN)
-  add_row("Demuxer Cache:", string.format("%.1fs  (buffering: %d%%)", live_demuxer_cache, stream_info.cache_buffering), TEXT_WHITE)
+  add_row("State:", (stream_info.idle_active and "IDLE" or (live_pause and "PAUSED" or "PLAYING")),
+     live_pause and ORANGE or NEON_GREEN)
+  add_row("Demuxer Cache:", string.format("%.1fs  (buffering: %d%%)", live_demuxer_cache, stream_info.cache_buffering),
+     TEXT_WHITE)
   add_row("Video Codec:", stream_info.video_codec, TEXT_WHITE)
   add_row("Audio Codec:", stream_info.audio_codec, TEXT_WHITE)
 
@@ -360,11 +361,14 @@ render = function()
 
   add_row("Path:", stream_info.path ~= "" and stream_info.path or "N/A", TEXT_WHITE)
   add_row("Type:", stream_info.stream_type, NEON_GREEN)
-  add_row("Video:", string.format("%s  %dx%d  %.0ffps", stream_info.video_codec, stream_info.width, stream_info.height, stream_info.fps), TEXT_WHITE)
+  add_row("Video:", string.format("%s  %dx%d  %.0ffps", stream_info.video_codec, stream_info.width,
+     stream_info.height, stream_info.fps), TEXT_WHITE)
   add_row("Audio:", stream_info.audio_codec, TEXT_WHITE)
-  add_row("Demuxer Cache:", string.format("%.1fs  (buffering: %d%%)", stream_info.demuxer_cache, stream_info.cache_buffering), TEXT_WHITE)
+  add_row("Demuxer Cache:", string.format("%.1fs  (buffering: %d%%)", stream_info.demuxer_cache,
+     stream_info.cache_buffering), TEXT_WHITE)
   add_row("Position:", string.format("%.1fs / %.1fs", stream_info.time_pos, stream_info.duration), TEXT_WHITE)
-  add_row("State:", (stream_info.idle_active and "IDLE" or (stream_info.pause and "PAUSED" or "PLAYING")), stream_info.pause and ORANGE or NEON_GREEN)
+  add_row("State:", (stream_info.idle_active and "IDLE" or (stream_info.pause and "PAUSED" or "PLAYING")),
+     stream_info.pause and ORANGE or NEON_GREEN)
 
   -- Recent errors
   if #last_errors > 0 then
@@ -372,7 +376,7 @@ render = function()
     table.insert(a, string.format("{\\an7\\pos(%d,%d)\\fs17\\b1\\bord0\\shad0\\1c%s}--- RECENT ERRORS ---",
       x + 16, row_y, ass_rgb(RED)))
     row_y = row_y + row_h
-    for i, err in ipairs(last_errors) do
+    for _, err in ipairs(last_errors) do
       if row_y > y + panel_h - 30 then break end
       local short_err = err
       if #short_err > 110 then short_err = short_err:sub(1, 107) .. "..." end

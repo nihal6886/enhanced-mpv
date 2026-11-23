@@ -79,7 +79,8 @@ function extractStreamingData(playerResponse) {
   videoStreams.sort((a, b) => b.height - a.height || b.bitrate - a.bitrate);
   audioStreams.sort((a, b) => b.bitrate - a.bitrate);
 
-  const title = (playerResponse.videoDetails && playerResponse.videoDetails.title) || document.title;
+  // The visible page title is stable and safe to present; never use a CDN URL as a title.
+  const title = String(document.title || "").trim();
 
   return {
     title,

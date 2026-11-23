@@ -210,7 +210,8 @@ local function pick_media()
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
         Add-Type -AssemblyName System.Windows.Forms
         $d = New-Object System.Windows.Forms.OpenFileDialog
-        $d.Filter = "Media (*.mkv;*.mp4;*.webm;*.avi;*.mov;*.m3u8;*.mpd)|*.mkv;*.mp4;*.webm;*.avi;*.mov;*.m3u8;*.mpd;*.m4v;*.ts|All files (*.*)|*.*"
+      $d.Filter = "Media (*.mkv;*.mp4;*.webm;*.avi;*.mov;*.m3u8;*.mpd)|" ..
+        "*.mkv;*.mp4;*.webm;*.avi;*.mov;*.m3u8;*.mpd;*.m4v;*.ts|All files (*.*)|*.*"
         $d.Title = "Open Media File"
         if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.FileName) }
       ]=],
@@ -420,7 +421,8 @@ local function profile_menu()
     { title = "Anime Upscale", value = { "script-message-to", "enhanced_mpv", "apply-profile", "anime-upscale" } },
     { title = "Battery Saver", value = { "script-message-to", "enhanced_mpv", "apply-profile", "battery-saver" } },
     { title = "Cinema HDR", value = { "script-message-to", "enhanced_mpv", "apply-profile", "cinema-hdr" } },
-    { title = "Software Fallback", value = { "script-message-to", "enhanced_mpv", "apply-profile", "software-fallback" } },
+    { title = "Software Fallback", value = { "script-message-to", "enhanced_mpv", "apply-profile",
+       "software-fallback" } },
   }
   if cfg.profiles then
     for _, p in ipairs(cfg.profiles) do
@@ -528,7 +530,8 @@ local function search_dialogue()
   for _, c in ipairs(cues) do
     items[#items + 1] = {
       title = c.text,
-      hint = string.format("%02d:%02d:%02d", math.floor(c.start / 3600), math.floor(c.start / 60) % 60, math.floor(c.start) % 60),
+      hint = string.format("%02d:%02d:%02d", math.floor(c.start / 3600), math.floor(c.start / 60) % 60,
+         math.floor(c.start) % 60),
       value = { "script-message-to", "enhanced_mpv", "jump-time", string.format("%.3f", c.start) },
     }
   end
@@ -658,12 +661,17 @@ local function main_menu()
     title = "Enhanced MPV",
     search_style = "on_demand",
     items = {
-      { title = "Open Media File", hint = "Ctrl+O", icon = "folder_open", value = { "script-binding", "enhanced_mpv/open_media" } },
+      { title = "Open Media File", hint = "Ctrl+O", icon = "folder_open", value = { "script-binding",
+         "enhanced_mpv/open_media" } },
       { title = "Open URL", hint = "Ctrl+L", icon = "link", value = { "script-binding", "enhanced_mpv/open_url" } },
-      { title = "Open Subtitle File", icon = "subtitles", value = { "script-message-to", "smart_sub_manager", "open-subtitle-file" } },
-      { title = "Search Subtitles", hint = "Alt+S", icon = "manage_search", value = { "script-message-to", "smart_sub_manager", "search-subtitles" } },
-      { title = "Auto-Sync Subtitles", hint = "Alt+Y", icon = "sync_alt", value = { "script-message-to", "smart_sub_manager", "autosync" } },
-      { title = "Search dialogue", hint = "/", icon = "search", value = { "script-binding", "enhanced_mpv/search_subtitles_text" } },
+      { title = "Open Subtitle File", icon = "subtitles", value = { "script-message-to", "smart_sub_manager",
+         "open-subtitle-file" } },
+      { title = "Search Subtitles", hint = "Alt+S", icon = "manage_search", value = { "script-message-to",
+         "smart_sub_manager", "search-subtitles" } },
+      { title = "Auto-Sync Subtitles", hint = "Alt+Y", icon = "sync_alt", value = { "script-message-to",
+         "smart_sub_manager", "autosync" } },
+      { title = "Search dialogue", hint = "/", icon = "search",
+        value = { "script-binding", "enhanced_mpv/search_subtitles_text" } },
       { title = "Subtitle delay", items = {
           { title = "-0.1s", hint = "z", value = { "add", "sub-delay", "-0.1" } },
           { title = "+0.1s", hint = "x", value = { "add", "sub-delay", "0.1" } },
@@ -671,9 +679,11 @@ local function main_menu()
         }
       },
       { title = "Dual subtitles", hint = "Alt+D", value = { "script-binding", "enhanced_mpv/toggle_dual_subs" } },
-      { title = "Night Mode", hint = "Alt+N", icon = "bedtime", value = { "script-binding", "enhanced_mpv/toggle_night_mode" } },
+      { title = "Night Mode", hint = "Alt+N", icon = "bedtime",
+        value = { "script-binding", "enhanced_mpv/toggle_night_mode" } },
       { title = "Hardware decode toggle", hint = "Alt+H", value = { "script-binding", "enhanced_mpv/toggle_hwdec" } },
-      { title = "Reload Current Stream", hint = "Alt+R", icon = "replay", value = { "script-binding", "enhanced_mpv/reload_stream" } },
+      { title = "Reload Current Stream", hint = "Alt+R", icon = "replay", value = { "script-binding",
+         "enhanced_mpv/reload_stream" } },
       { title = "A-B Loop", hint = "L", value = { "script-binding", "enhanced_mpv/ab_loop" } },
       { title = "Speed", items = {
           { title = "0.5x", hint = "1", value = { "script-binding", "enhanced_mpv/speed_05" } },
@@ -684,9 +694,11 @@ local function main_menu()
         }
       },
       { title = "Profiles", icon = "tune", value = { "script-binding", "enhanced_mpv/profile_menu" } },
-      { title = "Bookmarks", hint = "Ctrl+B", icon = "bookmark", value = { "script-binding", "enhanced_mpv/show_bookmarks" } },
+      { title = "Bookmarks", hint = "Ctrl+B", icon = "bookmark", value = { "script-binding",
+         "enhanced_mpv/show_bookmarks" } },
       { title = "Save bookmark", value = { "script-binding", "enhanced_mpv/save_bookmark" } },
-      { title = "Screenshot with Subtitles", hint = "Ctrl+S", value = { "script-binding", "enhanced_mpv/screenshot_subs" } },
+      { title = "Screenshot with Subtitles", hint = "Ctrl+S",
+        value = { "script-binding", "enhanced_mpv/screenshot_subs" } },
       { title = "Clipboard Watch Mode", value = { "script-binding", "enhanced_mpv/toggle_clipboard" } },
       { title = "Next Episode", hint = "E", value = { "script-binding", "enhanced_mpv/next_episode_now" } },
     },

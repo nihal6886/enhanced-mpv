@@ -643,6 +643,11 @@ async function go(action, explicitUrl, forcePageUrl = false) {
   // Step 1: Pausing browser player
   setStep(progressEl, 1, "active");
   const tab = await activeTab();
+  // Start takeover immediately while stream selection and playback position are resolved.
+  const takeover = tab && tab.id != null
+    ? chrome.tabs.sendMessage(tab.id, { type: "TAKEOVER_PAUSE" }).catch(() => null)
+    : Promise.resolve(null);
+  const selectedUrlTask = explicitUrl ? Promise.resolve(explicitUrl) : selectedUrl();
   let startTime;
   let duration;
   let startTimeSource = "none";
@@ -676,8 +681,8 @@ async function go(action, explicitUrl, forcePageUrl = false) {
   setStep(progressEl, 1, "done");
   setStep(progressEl, 2, "active");
 
-  const url = explicitUrl || await selectedUrl();
-  const out = await chrome.runtime.sendMessage({
+  const [url] = await Promise.all([selectedUrlTask, takeover]);
+  const launchTask = chrome.runtime.sendMessage({
     type: "launch",
     url,
     action,
@@ -686,6 +691,7 @@ async function go(action, explicitUrl, forcePageUrl = false) {
     startTimeSource,
     forcePageUrl,
   });
+  const out = await launchTask;
 
   // Step 3: Opening Enhanced MPV
   setStep(progressEl, 2, "done");

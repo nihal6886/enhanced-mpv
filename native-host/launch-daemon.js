@@ -41,6 +41,7 @@ const IPC_PIPE_PATH = "\\\\.\\pipe\\enhanced-mpv-socket";
 
 let persistentSocket = null;
 let socketReconnectTimer = null;
+let daemonClosing = false;
 let socketConnecting = false;
 const prewarmedStreams = new Map();
 let standbyMpvProcess = null;
@@ -217,6 +218,7 @@ async function executeZeroWaitLaunch(_startTime, _title) {
     ["script-message", "enhanced-mpv-focus"],
   ];
 
+  // The loading-screen script listens to focus so prewarmed launches show it too.
   if (!flushIpcCommands(commands)) {
     appendLaunchLog("[" + new Date().toISOString() + "] hot path IPC write failed");
     return false;
@@ -465,7 +467,11 @@ function connectPersistentSocket() {
       if (persistentSocket === sock) {
         persistentSocket = null;
         resetIpcState();
-        scheduleSocketReconnect();
+        if (!daemonClosing) {
+          killStandbyMpv();
+          void ensureStandbyMpv();
+          scheduleSocketReconnect();
+        }
       }
     });
     sock.on("data", handleMpvIpcResponse);
@@ -486,11 +492,8 @@ function flushIpcCommands(commands) {
   const sock = persistentSocket;
   if (!sock || sock.destroyed || !sock.writable) return false;
   try {
-    for (const cmd of commands) {
-      // mpv IPC requires every command to be wrapped in a {"command": [...]}
-      // envelope. A bare JSON array is parsed as an event and ignored.
-      sock.write(JSON.stringify({ command: cmd }) + "\n");
-    }
+    // Queue the newline-delimited command batch in one socket write.
+    sock.write(commands.map((cmd) => JSON.stringify({ command: cmd }) + "\n").join(""));
     return true;
   } catch {
     return false;
@@ -793,6 +796,7 @@ async function dispatchPlay(rawPayload) {
 const FIXED_DAEMON_PORT = 0;
 
 async function startLaunchDaemon(options) {
+  daemonClosing = false;
   if (activeServer) return activeServer;
   const opts = options || {};
   const token = crypto.randomBytes(24).toString("hex");
@@ -1033,6 +1037,7 @@ async function startLaunchDaemon(options) {
   await ensureStandbyMpv();
 
   const close = () => new Promise((resolve) => {
+    daemonClosing = true;
     clearDaemonEndpoint();
     killStandbyMpv();
     if (persistentSocket) {

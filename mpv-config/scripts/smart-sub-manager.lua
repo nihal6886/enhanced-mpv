@@ -764,10 +764,12 @@ local function pick_subtitle_file()
   elseif plat == "darwin" then
     args = {
       "osascript", "-e",
-      'POSIX path of (choose file with prompt "Open Subtitle File" of type {"public.plain-text","srt","ass","ssa","vtt"})',
+      'POSIX path of (choose file with prompt "Open Subtitle File" ' ..
+        'of type {"public.plain-text","srt","ass","ssa","vtt"})',
     }
   else
-    args = { "zenity", "--file-selection", "--title=Open Subtitle File", "--file-filter=Subtitles | *.srt *.ass *.ssa *.vtt" }
+    args = { "zenity", "--file-selection", "--title=Open Subtitle File",
+      "--file-filter=Subtitles | *.srt *.ass *.ssa *.vtt" }
   end
   run_async(args, 120, function(success, result)
     local path = success and result and result.stdout or ""

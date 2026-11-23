@@ -6,6 +6,16 @@ globalThis.__empvContentInstalled = true;
 
 const RESOURCE_RE = /\.(m3u8|mpd|vtt|srt)(?:$|[?#])/i;
 const MANIFEST_RE = /\.(m3u8|mpd)(?:$|[?#])/i;
+let speculativeTimer = null;
+
+function scheduleSpeculativeScan() {
+  if (document.visibilityState !== "visible") return;
+  clearTimeout(speculativeTimer);
+  speculativeTimer = setTimeout(() => {
+    void post();
+    safeRuntimeSendMessage({ type: "autoPrewarm" });
+  }, 600);
+}
 
 function safeRuntimeSendMessage(message) {
   try {
@@ -16,41 +26,6 @@ function safeRuntimeSendMessage(message) {
     return Promise.resolve(undefined);
   }
 }
-
-const MIN_VIDEO_WIDTH = 320;
-const MIN_VIDEO_HEIGHT = 180;
-const HOVER_PILL_ID = "__empv_hover_pill";
-const HOVER_PILL_STYLES = `
-  position: fixed;
-  z-index: 2147483647;
-  pointer-events: auto;
-  background: linear-gradient(180deg, #0D1117 0%, #161B22 100%);
-  border: 1px solid #4ADE80;
-  border-radius: 6px;
-  padding: 6px 10px;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", system-ui, sans-serif;
-  font-size: 11px;
-  font-weight: 600;
-  color: #4ADE80;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.6), 0 0 0 1px rgba(74,222,128,0.2);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  opacity: 0;
-  transform: translateY(-4px);
-  transition: opacity 120ms ease, transform 120ms ease;
-  white-space: nowrap;
-`;
-const HOVER_PILL_HOVER_STYLES = `
-  opacity: 1;
-  transform: translateY(0);
-`;
-const HOVER_PILL_READY_STYLES = `
-  background: linear-gradient(180deg, #0D1117 0%, #161B22 100%);
-  border-color: #4ADE80;
-  color: #4ADE80;
-`;
 
 function isManifestUrl(url) {
   return MANIFEST_RE.test(url);
@@ -327,239 +302,39 @@ async function post() {
   }
 }
 
-// ============================================================================
-// Shadow-DOM Hover Pill for Manual Instant Launch
-// ============================================================================
-
-let hoverPill = null;
-let hoverPillVideo = null;
-let hoverPillHideTimer = null;
-let hoverPillText = null;
-let hoverPillSub = null;
-let shadowReady = false;
-
-function createHoverPill() {
-  if (hoverPill) return hoverPill;
-
-  const host = document.createElement("div");
-  host.id = HOVER_PILL_ID;
-  host.setAttribute("role", "button");
-  host.setAttribute("tabindex", "0");
-  host.setAttribute("title", "Open this video in Enhanced MPV");
-
-  // Closed Shadow DOM keeps page CSS out. All styling lives in :host so the
-  // .visible / .ready class toggles actually apply.
-  const shadow = host.attachShadow({ mode: "closed" });
-  const style = document.createElement("style");
-  style.textContent = `
-    :host {
-      ${HOVER_PILL_STYLES}
-    }
-    :host(.visible) {
-      ${HOVER_PILL_HOVER_STYLES}
-    }
-    :host(.ready) {
-      ${HOVER_PILL_READY_STYLES}
-    }
-    .pill-icon { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; opacity: 0.9; }
-    .pill-text { font-weight: 700; letter-spacing: 0.04em; }
-    .pill-sub { font-size: 10px; font-weight: 400; opacity: 0.8; }
-  `;
-  shadow.appendChild(style);
-
-  const icon = document.createElement("span");
-  icon.className = "pill-icon";
-  icon.textContent = "MPV";
-  const text = document.createElement("span");
-  text.className = "pill-text";
-  text.textContent = shadowReady ? "SHADOW READY" : "OPEN IN MPV";
-  const sub = document.createElement("span");
-  sub.className = "pill-sub";
-  sub.textContent = shadowReady ? "Click for instant Frame 1" : "Click to launch";
-
-  const row = document.createElement("div");
-  row.style.cssText = "display:flex;align-items:center;gap:6px;";
-  row.append(icon, text, sub);
-  shadow.appendChild(row);
-
-  // Click handler - sends TAKEOVER_PAUSE to background and launches.
-  host.addEventListener("click", (e) => {
-    e.stopPropagation();
-    e.preventDefault();
-    handlePillClick();
-  });
-  host.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      handlePillClick();
-    }
-  });
-
-  document.body.appendChild(host);
-  hoverPill = host;
-  hoverPillText = text;
-  hoverPillSub = sub;
-  return host;
-}
-
-function updateHoverPillPosition(video) {
-  if (!hoverPill || !video) return;
-  const rect = video.getBoundingClientRect();
-  const pillWidth = hoverPill.getBoundingClientRect().width || hoverPill.offsetWidth;
-  const pillHeight = hoverPill.getBoundingClientRect().height || hoverPill.offsetHeight;
-  const maxLeft = Math.max(0, window.innerWidth - pillWidth);
-  const maxTop = Math.max(0, window.innerHeight - pillHeight);
-  // Fixed viewport coordinates keep the closed shadow host above overflow-clipped players.
-  const left = Math.min(maxLeft, Math.max(0, rect.right - pillWidth - 8));
-  const top = Math.min(maxTop, Math.max(0, rect.top + 8));
-  hoverPill.style.left = `${left}px`;
-  hoverPill.style.top = `${top}px`;
-}
-
-function showHoverPill(video) {
-  if (!hoverPill) createHoverPill();
-  hoverPillVideo = video;
-  updateHoverPillPosition(video);
-  
-  // Add visible class for animation
-  requestAnimationFrame(() => {
-    hoverPill.classList.add("visible");
-  });
-  
-  if (shadowReady) {
-    hoverPill.classList.add("ready");
-  }
-  
-  // Auto-hide after 3 seconds of no mouse movement over video
-  clearTimeout(hoverPillHideTimer);
-  hoverPillHideTimer = setTimeout(() => {
-    hideHoverPill();
-  }, 3000);
-}
-
-function hideHoverPill() {
-  if (!hoverPill) return;
-  hoverPill.classList.remove("visible");
-  hoverPillVideo = null;
-  clearTimeout(hoverPillHideTimer);
-}
-
-function handlePillClick() {
-  if (!hoverPillVideo) return;
-  
-  // Immediately pause and mute the browser video to release bandwidth
-  const video = hoverPillVideo;
-  video.pause();
-  video.muted = true;
-  
-  // Send TAKEOVER_PAUSE to background for instant launch
-  safeRuntimeSendMessage({
-    type: "TAKEOVER_PAUSE",
-    videoUrl: video.currentSrc || video.src,
-    currentTime: video.currentTime,
-    duration: video.duration,
-  });
-  
-  hideHoverPill();
-}
-
-function updateShadowReady(ready) {
-  shadowReady = ready;
-  if (!hoverPill) return;
-  if (ready) {
-    hoverPill.classList.add("ready");
-    if (hoverPillText) hoverPillText.textContent = "SHADOW READY";
-    if (hoverPillSub) hoverPillSub.textContent = "Click for instant Frame 1";
-  } else {
-    hoverPill.classList.remove("ready");
-    if (hoverPillText) hoverPillText.textContent = "OPEN IN MPV";
-    if (hoverPillSub) hoverPillSub.textContent = "Click to launch";
-  }
-}
-
-// Track mouse over video elements for hover pill
-let currentHoverVideo = null;
-
-function attachVideoHoverListeners() {
-  const videos = document.querySelectorAll("video");
-  videos.forEach(video => {
-    if (video.dataset.empvHoverAttached) return;
-
-    video.dataset.empvHoverAttached = "true";
-
-    video.addEventListener("mouseenter", () => {
-      if (video.videoWidth < MIN_VIDEO_WIDTH || video.videoHeight < MIN_VIDEO_HEIGHT) return;
-      currentHoverVideo = video;
-      clearTimeout(hoverPillHideTimer);
-      showHoverPill(video);
-      void safeRuntimeSendMessage({ type: "PREWARM_TOP_CANDIDATE" });
-    });
-    
-    video.addEventListener("mousemove", () => {
-      if (currentHoverVideo === video) {
-        clearTimeout(hoverPillHideTimer);
-        updateHoverPillPosition(video);
-        hoverPillHideTimer = setTimeout(() => {
-          hideHoverPill();
-        }, 3000);
-      }
-    });
-    
-    video.addEventListener("mouseleave", () => {
-      if (currentHoverVideo === video) {
-        currentHoverVideo = null;
-        hoverPillHideTimer = setTimeout(() => {
-          hideHoverPill();
-        }, 500);
-      }
-    });
-  });
-}
-
-// Observe new video elements
-const videoObserver = new MutationObserver(() => {
-  attachVideoHoverListeners();
+if (document.visibilityState === "visible") post();
+const obs = new MutationObserver(() => {
+  if (document.visibilityState === "visible") post();
 });
-videoObserver.observe(document.documentElement, { childList: true, subtree: true });
-
-// Initial attach
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", attachVideoHoverListeners);
-} else {
-  attachVideoHoverListeners();
-}
-
-// Listen for shadow ready updates from background
-chrome.runtime.onMessage.addListener((msg, _sender) => {
-  if (msg.type === "shadowReady") {
-    updateShadowReady(msg.ready);
-  }
-});
-
-// Handle TAKEOVER_PAUSE - immediately pause and mute all videos
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg.type === "TAKEOVER_PAUSE") {
-    for (const v of deepVideos()) {
-      try {
-        v.pause();
-        v.muted = true;
-      } catch { /* ignore */ }
-    }
-    // Also notify MAIN-world hook
-    document.dispatchEvent(new CustomEvent("__empv_media_req", {
-      detail: JSON.stringify({ id: "takeover-" + Date.now(), op: "pauseAll" })
-    }));
-    sendResponse({ ok: true });
-    return true;
-  }
-});
-
-post();
-const obs = new MutationObserver(() => post());
 obs.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "srclang"] });
-setInterval(post, 4000);
+setInterval(() => { if (document.visibilityState === "visible") post(); }, 4000);
+
+function watchVideo(video) {
+  if (video.__empvObserved) return;
+  try { Object.defineProperty(video, "__empvObserved", { value: true }); } catch { return; }
+  const ready = () => { if (video.readyState >= 1) scheduleSpeculativeScan(); };
+  video.addEventListener("loadedmetadata", ready, { passive: true });
+  video.addEventListener("playing", ready, { passive: true });
+  ready();
+}
+
+function observeVideos() {
+  if (document.visibilityState !== "visible") return;
+  for (const video of deepVideos()) watchVideo(video);
+}
+observeVideos();
+new MutationObserver(observeVideos).observe(document.documentElement, { childList: true, subtree: true });
+document.addEventListener("visibilitychange", observeVideos);
 
 chrome.runtime.onMessage.addListener(async (msg, _sender, sendResponse) => {
+  if (msg.type === "TAKEOVER_PAUSE") {
+    for (const v of deepVideos()) {
+      try { v.pause(); v.muted = true; } catch { /* ignore */ }
+    }
+    void hookRequest("pause");
+    sendResponse({ ok: true });
+    return false;
+  }
   if (msg.type === "pauseVideos") {
     pauseAllMedia().then(() => sendResponse({ ok: true }));
     return true;
@@ -585,6 +360,7 @@ window.addEventListener("message", async (event) => {
       type: "extractedStreams",
       data: data.data,
     });
+    scheduleSpeculativeScan();
   } else if (data.type === "EMPV_MANIFEST_URL" && data.url) {
     safeRuntimeSendMessage({
       type: "manifestUrl",
@@ -592,6 +368,7 @@ window.addEventListener("message", async (event) => {
       playerType: data.playerType,
       timestamp: data.timestamp,
     });
+    scheduleSpeculativeScan();
   }
 });
 

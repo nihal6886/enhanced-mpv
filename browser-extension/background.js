@@ -1378,15 +1378,6 @@ chrome.webRequest.onHeadersReceived.addListener(
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const tabId = sender.tab ? sender.tab.id : msg.tabId;
   (async () => {
-    if (msg.type === "PREWARM_TOP_CANDIDATE") {
-      const state = getState(tabId);
-      const verified = state.videos.filter((video) => video.verified === true && isDisplayVideo(video));
-      if (verified.length) {
-        await pushCandidatesUpdate(tabId, verified, state.qualities || []);
-      }
-      sendResponse({ ok: true, prewarmRequested: verified.length > 0 });
-      return;
-    }
     if (msg.type === "tracks") {
       const state = getState(tabId);
       if (msg.page) {
@@ -1437,6 +1428,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
       }
       persist(tabId);
+      scheduleActiveTabPrewarm(tabId);
+      sendResponse({ ok: true });
+      return;
+    }
+    if (msg.type === "autoPrewarm") {
+      scheduleActiveTabPrewarm(tabId);
       sendResponse({ ok: true });
       return;
     }
@@ -1660,27 +1657,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         persist(tabId);
       }
       sendResponse({ ok: true });
-      return;
-    }
-    // Manual instant launch from hover pill - TAKEOVER_PAUSE
-    if (msg.type === "TAKEOVER_PAUSE") {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      const tab = tabs[0];
-      if (tab && tab.id) {
-        // Find the video in state matching the URL
-        const state = getState(tab.id);
-        const video = state.videos.find(v => v.url.split("?")[0] === (msg.videoUrl || "").split("?")[0]);
-        const startTime = msg.currentTime || (video ? video.currentTime : 0);
-        const duration = msg.duration || (video ? video.duration : 0);
-        const out = await launch(tab, msg.videoUrl || video?.url || tab.url, "play", {
-          startTime,
-          duration,
-          startTimeSource: "hoverPill",
-        });
-        sendResponse(out);
-        return;
-      }
-      sendResponse({ ok: false, error: "no active tab" });
       return;
     }
   })();
@@ -2029,6 +2005,44 @@ async function daemonSend(payload, endpoint) {
 
 // Debounce prewarm offers per tab so repeated sniffer updates stay cheap.
 const lastPrewarmByTab = new Map();
+const speculativePrewarmTimers = new Map();
+
+function scheduleActiveTabPrewarm(tabId) {
+  if (!Number.isInteger(tabId) || tabId < 0) return;
+  const previous = speculativePrewarmTimers.get(tabId);
+  if (previous) clearTimeout(previous);
+  speculativePrewarmTimers.set(tabId, setTimeout(async () => {
+    speculativePrewarmTimers.delete(tabId);
+    try {
+      const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!active || active.id !== tabId) return;
+      const state = getState(tabId);
+      const video = state.videos.find(v => isDisplayVideo(v) &&
+        (v.verified || v.kind === "hls-master" || v.kind === "hls-video-only" || VIDEO_RE.test(v.url)));
+      if (!video) return;
+      const candidate = candidateFromVideo(state, video, state.page.title);
+      if (!candidate || !candidate.url) return;
+      const domainCookies = await getDomainCookies(state.page.url);
+      const pageOrigin = (() => { try { return new URL(state.page.url).origin; } catch { return ""; } })();
+      const requestHeaders = {
+        ...(candidate.headers || {}),
+        Referer: state.page.url || "",
+        Origin: pageOrigin,
+        "User-Agent": navigator.userAgent,
+        ...(domainCookies ? { Cookie: domainCookies } : {}),
+      };
+      const key = String(candidate.id || candidate.url);
+      const prev = lastPrewarmByTab.get(tabId);
+      if (prev && prev.key === key && Date.now() - prev.at < 15000) return;
+      lastPrewarmByTab.set(tabId, { key, at: Date.now() });
+      void prewarmStream(candidate.url, requestHeaders, candidate.audioUrl || null,
+        candidate.audioHeaders || {}, state.page.title || "", {
+          candidateId: candidate.id, tabId, startTime: video.currentTime || 0,
+          verified: candidate.verified === true,
+        });
+    } catch { /* active tab may have navigated or closed */ }
+  }, 600));
+}
 
 function bgLog(msg) {
   try { console.log('[' + new Date().toISOString() + '] ' + msg); } catch { /* ignore */ }
@@ -2040,8 +2054,7 @@ async function pushCandidatesUpdate(tabId, candidates, qualities) {
   const endpoint = await getDaemonEndpoint();
   if (!endpoint) return;
 
-  const topCandidate = candidates[0];
-  const isVerified = topCandidate.verified === true;
+  const prewarmCandidate = candidates.find((candidate) => candidate.verified === true);
 
   const payload = {
     type: "extension:candidates-update",
@@ -2065,18 +2078,18 @@ async function pushCandidatesUpdate(tabId, candidates, qualities) {
     // Ignore - daemon will be polled for state
   }
 
-  // Trigger prewarm for a verified top candidate, debounced per tab/candidate so
+  // Trigger prewarm for the first verified candidate, debounced per tab so
   // repeated sniffer updates do not spam the daemon.
-  if (isVerified) {
-    const key = String(topCandidate.id || topCandidate.url);
+  if (prewarmCandidate) {
+    const key = String(prewarmCandidate.id || prewarmCandidate.url);
     const previous = lastPrewarmByTab.get(tabId);
     if (!previous || previous.key !== key || Date.now() - previous.at > 15000) {
       lastPrewarmByTab.set(tabId, { key, at: Date.now() });
-      void prewarmStream(topCandidate.url, topCandidate.headers || {}, topCandidate.audioUrl || null, topCandidate.audioHeaders || {}, topCandidate.title || "", {
-        candidateId: topCandidate.id,
+      void prewarmStream(prewarmCandidate.url, prewarmCandidate.headers || {}, prewarmCandidate.audioUrl || null, prewarmCandidate.audioHeaders || {}, prewarmCandidate.title || "", {
+        candidateId: prewarmCandidate.id,
         tabId,
         startTime: 0,
-        verified: true,
+        verified: prewarmCandidate.verified === true,
       });
     }
   }

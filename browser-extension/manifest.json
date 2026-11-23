@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Enhanced MPV",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Play page videos in Enhanced MPV with captured streams and subtitles.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtl0Nv7MUKdQ58oqypJrF2UY00bMbAlMrFpfMEnwaOjgZlFdKjogakUdzHfbsnpyBiWipl5pSFzelc7E4w6PiO6IT8ESMD1jGAaQQDnPTMAQ/hVFcxrcvOPsKp7fZzimS8ra0qz1hFoG3SPH15RjqyrMmILrF42Li6yreHu7vV+52fKGPgXqwwZk1CNit8UukAc8SlBqwopTElud83LVyzzAnNRCAAxYcr4VxBjRAwH9S+36SdTIMwQblpXVjbiMlAJkOn+nmSrkicFEuqxHbydp/WeENuVAmNJXCX2wOftNubwPgUIRzrNcCxqgDqQ0UpSmZPKvD/yt9tPPSs/8cBwIDAQAB",
   "action": {
