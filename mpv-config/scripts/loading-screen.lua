@@ -1,437 +1,117 @@
--- Enhanced MPV - Studio-Grade Dark Studio Loading Sequence
--- 60 fps ASS overlay: dual-arc neon ring, 15-bar waveform, centered title, dynamic status
--- Center-anchored (\an5) all elements using dynamic osd-dimensions (cx = w/2, cy = h/2)
--- Dynamic status from PipelineState: SNIFFING -> PROBING -> PREWARMING -> SHADOW_READY -> LAUNCHING -> PLAYING | FAILOVER
--- Cross-fades \alpha out over 150ms once video-out-params confirms a real frame.
-
+-- Minimal dark-studio startup overlay. Drawing commands are isolated from text
+-- events so ASS vector mode can never leak raw coordinates into the labels.
 local mp = require("mp")
 local assdraw = require("mp.assdraw")
-local utils = require("mp.utils")
 local msg = require("mp.msg")
 
-local opts = {
-    enabled = true,
-    duration_ms = 1200,
-    fade_ms = 150,
-}
+local opts = { enabled = true, fade_ms = 120 }
 require("mp.options").read_options(opts, "loading-screen")
 if not opts.enabled then return end
 
-local BG = "0D1117"
-local GREEN = "4ADE80"
-local GREEN_DIM = "2D5A43"
-local TEXT = "F0F6FC"
-local MUTED = "8B949E"
-local PANEL = "161B22"
-local AMBER = "FBBF24"
-local RED = "FF453A"
-
 local overlay = mp.create_osd_overlay("ass-events")
-local timer = nil
-local start_us = nil
-local fade_us = nil
+local timer, started, fade_started
 local visible = false
-local last_text = ""
-local base_w, base_h = 1920, 1080
+local width, height = 1920, 1080
+local video_width, video_height, core_idle = 0, 0, true
+local title = ""
 
--- PipelineState from stream-controller.lua
-local pipeline_stage = "BUFFERING"
-local pipeline_candidate = nil
-local pipeline_relay_stats = {}
-local pipeline_prewarm_ms = 0
-local pipeline_launch_ms = 0
-local zero_wait_ready = false
-local loading_title = ""
-
--- Track video readiness state
-local video_width = 0
-local video_height = 0
-local core_idle = true
-
--- Forward declarations: the script-message and property callbacks below can fire
--- at any time, so these locals must exist before they are referenced.
-local stop_overlay
-local try_crossfade
-
-local function clamp(v, lo, hi)
-    if v < lo then return lo end
-    if v > hi then return hi end
-    return v
+local function clamp(value, low, high)
+    return math.max(low, math.min(high, value))
 end
 
-local function ease_out(t)
-    t = clamp(t, 0, 1)
-    return 1 - (1 - t) * (1 - t)
-end
-
-local function update_base()
-    local w, h = mp.get_osd_size()
-    if w and h and w > 0 and h > 0 then
-        base_w, base_h = w, h
-    end
-end
-
-local function cx()
-    return math.floor(base_w / 2)
-end
-
-local function cy()
-    return math.floor(base_h / 2)
-end
-
-local function safe_text(value, fallback)
-    value = tostring(value or ""):gsub("[\r\n]+", " "):gsub("{", ""):gsub("}", "")
-    value = value:gsub("^%s+", ""):gsub("%s+$", "")
-    if value == "" then return fallback end
-    if #value > 72 then value = value:sub(1, 69) .. "..." end
+local function clean_text(value, fallback, limit)
+    value = tostring(value or ""):gsub("[\r\n{}]", " "):gsub("%s+", " "):match("^%s*(.-)%s*$")
+    if value == "" then value = fallback end
+    if #value > limit then value = value:sub(1, limit - 3) .. "..." end
+    if value:match("https?://") or value:match("%.m3u8") then return fallback end
     return value
 end
 
-local function media_title()
-    if loading_title ~= "" then return loading_title end
-    local forced = mp.get_property("force-media-title")
-    if forced and forced ~= "" and not forced:match("^https?://") then return forced end
-    local title = mp.get_property("media-title")
-    if title and title ~= "" and not title:match("^https?://") then return title end
-    local filename = mp.get_property("filename/no-ext")
-    if filename and filename ~= "" then return filename end
-    return "Enhanced MPV"
+local function draw_rect(out, x1, y1, x2, y2, color)
+    out:new_event()
+    out:pos(0, 0)
+    out:append(string.format("{\\an7\\bord0\\shad0\\1c&H%s&}", color))
+    out:draw_start()
+    out:round_rect_cw(x1, y1, x2, y2, math.floor((y2 - y1) / 2))
+    out:draw_stop()
+    -- Explicitly leave vector drawing mode in a separate event/layer.
+    out:new_event()
+    out:pos(0, 0)
+    out:append("{\\an7\\p0}")
 end
 
-local function quality_pill()
-    local h = mp.get_property_number("height", 0)
-    local fps = mp.get_property_number("container-fps", 0)
-    local vcodec = mp.get_property("video-codec") or ""
-    local codec = "VIDEO"
-    if vcodec:match("av01") or vcodec:lower():match("av1") then codec = "AV1"
-    elseif vcodec:match("hev") or vcodec:match("265") then codec = "HEVC"
-    elseif vcodec:match("avc") or vcodec:match("264") then codec = "H264"
-    elseif vcodec:match("vp9") then codec = "VP9"
-    elseif vcodec:match("vp8") then codec = "VP8"
-    end
-    local parts = {}
-    if h > 0 then parts[#parts + 1] = tostring(math.floor(h + 0.5)) .. "p" end
-    if fps > 0 then parts[#parts + 1] = string.format("%.0ffps", fps) end
-    parts[#parts + 1] = codec
-    return table.concat(parts, "  ")
+local function status()
+    if video_width > 0 and video_height > 0 and not core_idle then return "READY" end
+    if started and mp.get_time() - started > 0.15 then return "BUFFERING FIRST FRAME..." end
+    return "CONNECTING STREAM..."
 end
 
-local function cache_fraction()
-    local demux = mp.get_property_number("demuxer-cache-duration", 0) or 0
-    local cache = mp.get_property_number("cache-buffering-state", 0) or 0
-    if cache > 0 then return clamp(cache / 100, 0, 1) end
-    return clamp(demux / 8, 0, 1)
+local function quality()
+    local codec = (mp.get_property("video-codec") or ""):lower()
+    local label = codec:find("av1", 1, true) and "AV1" or codec:find("hevc", 1, true) and "HEVC" or codec:find("h264", 1, true) and "H.264" or "VIDEO"
+    if video_width > 0 and video_height > 0 then return string.format("%dx%d  |  %s", video_width, video_height, label) end
+    return "STREAM  |  " .. label
 end
 
--- Receive PipelineState from stream-controller.lua
-mp.register_script_message("pipeline_state_applied", function(json)
-    local ok, data = pcall(utils.parse_json, json)
-    if ok and data then
-        pipeline_stage = data.stage or pipeline_stage
-        pipeline_candidate = data.candidate
-        pipeline_relay_stats = data.relayStats or {}
-        pipeline_prewarm_ms = data.prewarmMs or 0
-        pipeline_launch_ms = data.launchMs or 0
-    end
-end)
-
-mp.register_script_message("shadow_ready", function(json)
-    local ok, data = pcall(utils.parse_json, json)
-    if ok and data then
-        zero_wait_ready = true
-        pipeline_stage = "SHADOW_READY"
-        pipeline_candidate = data.candidate
-        pipeline_prewarm_ms = data.prewarmMs or 0
-    end
-end)
-
-mp.register_script_message("sniffer_state_change", function(json)
-    local ok, data = pcall(utils.parse_json, json)
-    if ok and data then
-        if data.state then pipeline_stage = data.state end
-        if data.zero_wait_ready ~= nil then zero_wait_ready = data.zero_wait_ready end
-        -- If SHADOW_READY achieved, stop the loading overlay immediately
-        if pipeline_stage == "SHADOW_READY" and zero_wait_ready and visible then
-            stop_overlay()
-        end
-    end
-end)
-
-mp.register_script_message("loading-screen-status", function() end)
-
-local function get_dynamic_status()
-    if pipeline_stage == "SHADOW_READY" then
-        return string.format("SHADOW READY - %.0fms prewarm - INSTANT LAUNCH", pipeline_prewarm_ms)
-    elseif pipeline_stage == "PREWARMING" then
-        local title = pipeline_candidate and pipeline_candidate.title or "stream"
-        return string.format("PREWARMING: %s...", safe_text(title, "stream"))
-    elseif pipeline_stage == "PROBING" then
-        return "PROBING STREAM..."
-    elseif pipeline_stage == "SNIFFING" then
-        return "SNIFFING STREAMS..."
-    elseif pipeline_stage == "LAUNCHING" then
-        return string.format("LAUNCHING... (%.0fms)", pipeline_launch_ms)
-    elseif pipeline_stage == "PLAYING" then
-        if zero_wait_ready then
-            return "ZERO-WAIT HOT PATH: LIVE FRAME 1"
-        end
-        return "PLAYING"
-    elseif pipeline_stage == "FAILOVER" then
-        return "FAILOVER: SEARCHING NEXT STREAM..."
-    elseif pipeline_stage == "BUFFERING" then
-        return "BUFFERING..."
-    elseif pipeline_stage == "IDLE" then
-        return "IDLE"
-    end
-    return "BUFFERING..."
-end
-
-local function get_relay_status_line()
-    if not pipeline_relay_stats or not pipeline_relay_stats.bytesPrefetched then return "" end
-    local mb = (pipeline_relay_stats.bytesPrefetched / 1024 / 1024)
-    local segs = pipeline_relay_stats.segmentsCached or 0
-    if mb < 0.1 then return "" end
-    return string.format("RAM Ring: %.1f MiB / %d segs", mb, segs)
-end
-
-local function render(now_us)
-    if not visible or not start_us then return end
-    update_base()
-
-    local elapsed_ms = (now_us - start_us) / 1000
-    local fade_ms = clamp(tonumber(opts.fade_ms) or 160, 60, 2000)
+local function render(now)
+    if not visible or not started then return end
+    local w, h = mp.get_osd_size()
+    if w and h and w > 0 and h > 0 then width, height = w, h end
     local alpha = 0
-    if fade_us then
-        local faded_ms = (now_us - fade_us) / 1000
-        if faded_ms >= fade_ms then
-            overlay.data = ""
-            overlay:remove()
-            visible = false
-            fade_us = nil
-            last_text = ""
-            if timer then timer:kill(); timer = nil end
-            return
-        end
-        alpha = math.floor(255 * clamp(faded_ms / fade_ms, 0, 1))
+    if fade_started then
+        local progress = clamp((now - fade_started) * 1000 / math.max(1, tonumber(opts.fade_ms) or 120), 0, 1)
+        alpha = math.floor(progress * 255)
+        if progress >= 1 then overlay.data = ""; overlay:remove(); visible = false; if timer then timer:kill(); timer = nil end; return end
     end
-
-    local t = elapsed_ms / 1000
-    local intro = ease_out(elapsed_ms / 350)
-    local pulse = 0.5 + 0.5 * math.sin(t * 4.8)
-    local spin = t * 220
-    local cache = cache_fraction()
-
-    local cx_pos = cx()
-    local cy_pos = cy()
-
-    local a = assdraw.ass_new()
-    -- Dark studio backdrop (full screen)
-    a:new_event()
-    a:pos(0, 0)
-    a:append(string.format("{\\an7\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", BG, alpha))
-    a:draw_start()
-    a:rect_cw(0, 0, base_w, base_h)
-    a:draw_stop()
-
-    -- Center ring glow (centered at cx, cy-92)
-    local ring_cx, ring_cy, r = cx_pos, cy_pos - 92, 78
-    a:new_event()
-    a:pos(0, 0)
-    a:append(string.format("{\\an7\\bord10\\shad0\\1a&HFF&\\3c&H%s&\\3a&H%02X&}", GREEN, clamp(alpha + 170 - math.floor(pulse * 30), 0, 255)))
-    a:draw_start()
-    a:round_rect_cw(ring_cx - r, ring_cy - r, ring_cx + r, ring_cy + r, r)
-    a:draw_stop()
-
-    -- Ring track
-    a:new_event()
-    a:pos(0, 0)
-    a:append(string.format("{\\an7\\bord4\\shad0\\1a&HFF&\\3c&H%s&\\3a&H%02X&}", GREEN_DIM, clamp(alpha + 90, 0, 255)))
-    a:draw_start()
-    a:round_rect_cw(ring_cx - r, ring_cy - r, ring_cx + r, ring_cy + r, r)
-    a:draw_stop()
-
-    -- Spinning arc segments (3 arcs, 120deg apart)
-    for i = 0, 2 do
-        local ang = math.rad(spin + i * 120)
-        local x1 = ring_cx + math.cos(ang) * r
-        local y1 = ring_cy + math.sin(ang) * r
-        local x2 = ring_cx + math.cos(ang + 0.85) * r
-        local y2 = ring_cy + math.sin(ang + 0.85) * r
-        a:new_event()
-        a:pos(0, 0)
-        a:append(string.format("{\\an7\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", GREEN, clamp(alpha + 20, 0, 255)))
-        a:draw_start()
-        a:move_to(math.floor(x1), math.floor(y1))
-        a:line_to(math.floor(x2), math.floor(y2))
-        a:line_to(math.floor(x2 + math.cos(ang + 0.42) * 5), math.floor(y2 + math.sin(ang + 0.42) * 5))
-        a:line_to(math.floor(x1 + math.cos(ang + 0.42) * 5), math.floor(y1 + math.sin(ang + 0.42) * 5))
-        a:draw_stop()
-    end
-
-    -- Symmetrical 15-bar waveform (centered below ring at cy+8)
-    local bars, bw, gap = 15, 12, 8
-    local baseY = cy_pos + 8
-    local startX = cx_pos - ((bars * bw + (bars - 1) * gap) / 2)
-    for i = 0, bars - 1 do
-        local phase = t * 7 + i * 0.45
-        local h = 12 + (math.sin(phase) * 0.5 + 0.5) * 38 * intro
-        local x = startX + i * (bw + gap)
-        local barAlpha = clamp(alpha + math.floor((1 - math.abs(i - bars / 2) / (bars / 2)) * 30), 0, 255)
-        a:new_event()
-        a:pos(0, 0)
-        a:append(string.format("{\\an7\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", (i % 4 == 0) and GREEN or GREEN_DIM, barAlpha))
-        a:draw_start()
-        a:round_rect_cw(math.floor(x), math.floor(baseY - h), math.floor(x + bw), math.floor(baseY + h), 3)
-        a:draw_stop()
-    end
-
-    -- Top badge: ENHANCED MPV + quality/codec pill (cy - 105)
-    local badge_y = cy_pos - 105
-    local pill = safe_text(quality_pill(), "VIDEO")
-    local pillW = clamp(200 + #pill * 7, 220, 480)
-    local pillX = cx_pos - math.floor(pillW / 2)
-
-    a:new_event()
-    a:pos(0, 0)
-    a:append(string.format("{\\an5\\fs20\\b1\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", GREEN, alpha))
-    a:draw_start()
-    a:move_to(cx_pos - 100, badge_y)
-    a:line_to(cx_pos + 100, badge_y)
-    a:draw_stop()
-
-    a:new_event()
-    a:pos(0, 0)
-    a:append(string.format("{\\an5\\fs16\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", TEXT, alpha))
-    a:move_to(cx_pos, badge_y)
-    a:append("ENHANCED MPV")
-
-    -- Quality/codec pill
-    a:new_event()
-    a:pos(0, 0)
-    a:append(string.format("{\\an7\\bord1\\shad0\\1c&H%s&\\3c&H%s&\\alpha&H%02X&\\3a&H%02X&}", PANEL, GREEN_DIM, clamp(alpha + 20, 0, 255), clamp(alpha + 40, 0, 255)))
-    a:draw_start()
-    a:round_rect_cw(pillX, badge_y + 18, pillX + pillW, badge_y + 18 + 32, 16)
-    a:draw_stop()
-    a:new_event()
-    a:append(string.format("{\\an5\\fs18\\bord0\\shad0\\fnmpv-osd-symbols\\1c&H%s&\\alpha&H%02X&}", GREEN, alpha))
-    a:move_to(cx_pos, badge_y + 34)
-    a:append(pill)
-
-    -- Title: single-line centered #F0F6FC at cy - 58 (ellipsized at 58 chars)
-    local title = safe_text(media_title(), "Enhanced MPV")
-    a:new_event()
-    a:append(string.format("{\\an5\\fs42\\bord0\\shad0\\fnmpv-osd-symbols\\1c&H%s&\\alpha&H%02X&}", TEXT, alpha))
-    a:move_to(cx_pos, cy_pos - 58)
-    a:append(title)
-
-    -- Dynamic PipelineState status at cy + 78
-    local dynamic_status = get_dynamic_status()
-    local status_color = GREEN
-    if pipeline_stage == "FAILOVER" then status_color = RED
-    elseif pipeline_stage == "PREWARMING" then status_color = AMBER
-    elseif pipeline_stage == "SHADOW_READY" then status_color = GREEN
-    end
-    a:new_event()
-    a:append(string.format("{\\an5\\fs22\\bord0\\shad0\\fnmpv-osd-symbols\\1c&H%s&\\alpha&H%02X&}", status_color, alpha))
-    a:move_to(cx_pos, cy_pos + 78)
-    a:append(dynamic_status)
-
-    -- Relay stats line (RAM Segment Ring)
-    local relay_line = get_relay_status_line()
-    if relay_line ~= "" then
-        a:new_event()
-        a:append(string.format("{\\an5\\fs16\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", MUTED, alpha))
-        a:move_to(cx_pos, cy_pos + 104)
-        a:append(relay_line)
-    end
-
-    -- Progress bar at cy + 126 (sharing exact cx center)
-    local barW, barH = 420, 6
-    local barX = cx_pos - math.floor(barW / 2)
-    local barY = cy_pos + 126
-
-    a:new_event()
-    a:pos(0, 0)
-    a:append(string.format("{\\an7\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", "243041", clamp(alpha + 30, 0, 255)))
-    a:draw_start()
-    a:round_rect_cw(barX, barY, barX + barW, barY + barH, 3)
-    a:draw_stop()
-
-    a:new_event()
-    a:pos(0, 0)
-    a:append(string.format("{\\an7\\bord0\\shad0\\1c&H%s&\\alpha&H%02X&}", GREEN, alpha))
-    a:draw_start()
-    a:round_rect_cw(barX, barY, barX + math.floor(barW * clamp(cache, 0.06, 1)), barY + barH, 3)
-    a:draw_stop()
-
-    local text = a.text
-    if text ~= last_text then
-        overlay.res_x = base_w
-        overlay.res_y = base_h
-        overlay.data = text
-        overlay:update()
-        last_text = text
-    end
+    local cx, cy = math.floor(width / 2), math.floor(height / 2)
+    local bar_width, bar_y = math.min(560, math.floor(width * 0.55)), cy - 125
+    local progress = clamp((now - started) / 2.5, 0.08, 0.94)
+    local out = assdraw.ass_new()
+    out:new_event(); out:pos(0, 0)
+    out:append(string.format("{\\an7\\bord0\\shad0\\1c&H17110D&\\alpha&H%02X&}", alpha))
+    out:draw_start(); out:rect_cw(0, 0, width, height); out:draw_stop()
+    out:new_event(); out:pos(24, 22)
+    out:append(string.format("{\\an7\\fs11\\bord0\\shad0\\1c&H9E948B&\\alpha&H%02X&}ENHANCED MPV v1.1.0", alpha))
+    draw_rect(out, cx - math.floor(bar_width / 2), bar_y, cx + math.floor(bar_width / 2), bar_y + 5, "221B16")
+    draw_rect(out, cx - math.floor(bar_width / 2), bar_y, cx - math.floor(bar_width / 2) + math.floor(bar_width * progress), bar_y + 5, "80DE4A")
+    out:new_event(); out:pos(cx, cy - 53)
+    out:append(string.format("{\\an5\\fs36\\bord0\\shad0\\1c&HFCF6F0&\\alpha&H%02X&}%s", alpha, clean_text(title, "Enhanced MPV", 64)))
+    out:new_event(); out:pos(cx, cy + 5)
+    out:append(string.format("{\\an5\\fs19\\bord0\\shad0\\1c&H80DE4A&\\alpha&H%02X&}%s", alpha, status()))
+    draw_rect(out, cx - 115, cy + 24, cx + 115, cy + 54, "221B16")
+    out:new_event(); out:pos(cx, cy + 38)
+    out:append(string.format("{\\an5\\fs15\\bord0\\shad0\\1c&H9E948B&\\alpha&H%02X&}%s", alpha, clean_text(quality(), "STREAM", 40)))
+    overlay.res_x, overlay.res_y, overlay.data = width, height, out.text
+    overlay:update()
 end
 
-stop_overlay = function()
+local function stop()
     if timer then timer:kill(); timer = nil end
-    visible = false
-    start_us = nil
-    fade_us = nil
-    last_text = ""
-    overlay.data = ""
-    overlay:remove()
+    visible, started, fade_started = false, nil, nil
+    overlay.data = ""; overlay:remove()
 end
 
-local function start_overlay()
-    stop_overlay()
-    visible = true
-    start_us = mp.get_time() * 1000000
-    render(start_us)
-    timer = mp.add_periodic_timer(1 / 60, function()
-        render(mp.get_time() * 1000000)
-    end)
-    try_crossfade()
-end
-
-local function crossfade_out()
-    if visible and not fade_us then
-        fade_us = mp.get_time() * 1000000
+local function try_fade()
+    if visible and video_width > 0 and video_height > 0 and not core_idle and not fade_started then
+        fade_started = mp.get_time()
     end
 end
 
-mp.register_event("start-file", start_overlay)
+local function start()
+    stop(); video_width, video_height, core_idle = 0, 0, true
+    visible = true; started = mp.get_time(); title = clean_text(mp.get_property("force-media-title") or mp.get_property("media-title"), "Enhanced MPV", 64)
+    timer = mp.add_periodic_timer(1 / 60, function() render(mp.get_time()); try_fade() end)
+    render(started)
+end
 
-mp.register_script_message("enhanced-mpv-loading", function(title)
-    loading_title = safe_text(title, "")
-    start_overlay()
-end)
-
+mp.register_event("start-file", start)
+mp.register_event("end-file", stop)
 mp.observe_property("video-out-params", "native", function(_, value)
-    if value and value.w and value.h and value.w > 0 and value.h > 0 then
-        video_width = value.w
-        video_height = value.h
-        try_crossfade()
-    end
+    video_width = value and (value.w or value.width) or 0
+    video_height = value and (value.h or value.height) or 0
+    try_fade()
 end)
-
-mp.observe_property("core-idle", "native", function(_, value)
-    core_idle = (value == true)
-    if value == false then
-        try_crossfade()
-    end
-end)
-
-try_crossfade = function()
-    -- Crossfade only when real video dimensions exist, the core is actively
-    -- decoding (not idle), and we are not on the SHADOW_READY hot path.
-    if video_width > 0 and video_height > 0 and not core_idle then
-        crossfade_out()
-    end
-end
-
-mp.register_event("end-file", stop_overlay)
-mp.register_event("shutdown", stop_overlay)
-
-msg.info("loading-screen.lua loaded (studio-grade 60fps centered)")
+mp.observe_property("core-idle", "native", function(_, value) core_idle = value ~= false; try_fade() end)
+mp.register_script_message("enhanced-mpv-loading", function(value) title = clean_text(value, "Enhanced MPV", 64); start() end)
+mp.register_event("shutdown", stop)
+msg.info("loading-screen.lua v1.1.0 loaded")

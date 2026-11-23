@@ -97,11 +97,14 @@ local function switch_stream_item(item, is_source)
   local options = {
     ytdl = "no",
     ["resume-playback"] = "no",
-    ["demuxer-lavf-analyzeduration"] = "0.15",
-    ["demuxer-lavf-probesize"] = "65536",
+    ["demuxer-lavf-analyzeduration"] = "0.25",
+    ["demuxer-lavf-probesize"] = "131072",
     ["cache"] = "yes",
     ["cache-secs"] = "15",
-    ["demuxer-readahead-secs"] = "5",
+    ["demuxer-readahead-secs"] = "8",
+    ["cache-pause-initial"] = "no",
+    ["cache-pause-wait"] = "0.1",
+    ["vd-lavc-threads"] = "0",
     ["hls-bitrate"] = "max",
     start = pos > 1 and string.format("%.3f", pos) or "none",
   }

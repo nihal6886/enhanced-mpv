@@ -4,7 +4,7 @@
 
 **Turn stock mpv into a VLC-class player with one-click playback from your browser.**
 
-[![Version](https://img.shields.io/badge/version-1.0.0-4ADE80?style=flat-square)](https://github.com/nihal6886/enhanced-mpv/releases/latest)
+[![Version](https://img.shields.io/badge/version-1.1.0-4ADE80?style=flat-square)](https://github.com/nihal6886/enhanced-mpv/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/nihal6886/enhanced-mpv/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/nihal6886/enhanced-mpv/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat-square)
@@ -89,7 +89,7 @@ mpv never launches on its own when a page starts playing. Every launch is user-t
 - **Hover pill**: an auto-hiding pill (`#0D1117` + `#4ADE80`) appears at the top-right of active `<video>` elements at least 320 × 180, showing `SHADOW READY` or `OPEN IN MPV`. It lives in a closed Shadow DOM, so page styles can't touch it.
 - **Instant bandwidth release (`TAKEOVER_PAUSE`)**: the moment you launch, the tab's `<video>` element is paused and muted. The browser stops downloading duplicate HLS/DASH segments and mpv gets the full connection.
 - **Zero-Wait Shadow Pre-Load**: a hidden standby mpv loads the stream paused while you are still on the page, so the window opens already playing Frame 1 in under 5 ms. See [Architecture](#architecture--pipelinestate).
-- **Fast demuxer and decoder tuning** (`mpv.conf`, `mpv-launcher.js`) for streams that were not preloaded: `--demuxer-lavf-probesize=262144`, `--demuxer-lavf-analyzeduration=0.5`, `--cache-pause-initial=no`, `--initial-audio-sync=no`, and `--hwdec=d3d11va` with an `auto-copy` fallback.
+- **Fast demuxer and decoder tuning** (`mpv.conf`, `mpv-launcher.js`) for streams that were not preloaded: `--demuxer-lavf-probesize=131072`, `--demuxer-lavf-analyzeduration=0.25`, `--cache-pause-initial=no`, `--cache-pause-wait=0.1`, and `--hwdec=d3d11va` with an `auto-copy` fallback.
 - **Automatic failover**: if the top-ranked stream fails to produce a frame within 1.5 s, the launcher moves to the next candidate without user input.
 
 ### Browser bridge
@@ -366,7 +366,7 @@ The playback thread is never blocked: all HTTP uses `mp.command_native_async`.
 - The popup lists streams and subtitles, shows a badge count, and offers an auto-intercept toggle.
 - The payload includes URL, title, Referer, User-Agent, cookies (when permitted), extra headers (Jellyfin, Plex, and Emby `Authorization`), subtitle URLs, a **paired `audioUrl` for split HLS**, and **`audioHeaders` for the relay**.
 - Failures return `{ ok, error, code, command }`, so the popup can explain DRM or expired tokens and offer **Copy mpv CLI command**.
-- Prewarmed streams also get fast cache flags: `--cache=yes`, `--demuxer-readahead-secs=5`, `--hls-bitrate=max`.
+- Prewarmed streams also get fast cache flags: `--cache=yes`, `--demuxer-readahead-secs=8`, `--hls-bitrate=max`.
 
 </details>
 

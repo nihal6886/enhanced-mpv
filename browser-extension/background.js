@@ -1378,6 +1378,15 @@ chrome.webRequest.onHeadersReceived.addListener(
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const tabId = sender.tab ? sender.tab.id : msg.tabId;
   (async () => {
+    if (msg.type === "PREWARM_TOP_CANDIDATE") {
+      const state = getState(tabId);
+      const verified = state.videos.filter((video) => video.verified === true && isDisplayVideo(video));
+      if (verified.length) {
+        await pushCandidatesUpdate(tabId, verified, state.qualities || []);
+      }
+      sendResponse({ ok: true, prewarmRequested: verified.length > 0 });
+      return;
+    }
     if (msg.type === "tracks") {
       const state = getState(tabId);
       if (msg.page) {

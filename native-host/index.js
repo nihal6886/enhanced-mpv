@@ -1,5 +1,7 @@
 "use strict";
 
+const RELEASE_VERSION = "1.1.0";
+
 const fs = require("fs");
 const path = require("path");
 const http = require("http");
@@ -14,6 +16,7 @@ const { parseFilename } = require("./filename-parser");
 const { convertSubtitle } = require("./vtt-converter");
 
 const HOST_NAME = "com.enhanced.mpv.host";
+const HOST_USER_AGENT = `EnhancedMPV/${RELEASE_VERSION}`;
 const CHROME_REG_KEYS = [
   "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\" + HOST_NAME,
   "HKCU\\Software\\Chromium\\NativeMessagingHosts\\" + HOST_NAME,
@@ -313,11 +316,15 @@ async function prewarmMpv() {
     "--idle=yes",
     "--force-window=no",
     "--input-ipc-server=" + ipcPath(),
-    "--demuxer-lavf-analyzeduration=0.5",
-    "--demuxer-lavf-probesize=262144",
+    "--demuxer-lavf-analyzeduration=0.25",
+    "--demuxer-lavf-probesize=131072",
     "--cache=yes",
     "--cache-secs=15",
-    "--demuxer-readahead-secs=5",
+    "--demuxer-readahead-secs=8",
+    "--cache-pause-initial=no",
+    "--cache-pause-wait=0.1",
+    "--vd-lavc-threads=0",
+    "--user-agent=" + HOST_USER_AGENT,
     "--hls-bitrate=max",
   ];
   if (cfg.profile) warmArgs.push("--profile=" + cfg.profile);

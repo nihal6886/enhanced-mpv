@@ -255,11 +255,13 @@ function authHeaderObject(audioHeaders) {
 }
 
 const FAST_START_OPTIONS = {
-  "demuxer-lavf-analyzeduration": "0.5",
-  "demuxer-lavf-probesize": "262144",
+  "demuxer-lavf-analyzeduration": "0.25",
+  "demuxer-lavf-probesize": "131072",
   "cache": "yes",
   "cache-secs": "15",
-  "demuxer-readahead-secs": "5",
+  "demuxer-readahead-secs": "8",
+  "cache-pause-wait": "0.1",
+  "vd-lavc-threads": "0",
   "hls-bitrate": "max",
   "cache-pause-initial": "no",
   "initial-audio-sync": "no",

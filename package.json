@@ -1,6 +1,6 @@
 {
   "name": "enhanced-mpv",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Cross-platform mpv media ecosystem with uosc UI, subtitle automation, and a Manifest V3 browser bridge",
   "license": "MIT",

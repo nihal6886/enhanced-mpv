@@ -15,6 +15,8 @@ try {
 
 "use strict";
 
+const RELEASE_VERSION = "1.1.0";
+
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
@@ -154,12 +156,16 @@ async function startPreload(candidate, tabId, startTime) {
     const opts = {
       pause: "yes",
       start: startTime && startTime > 0 ? "+" + Math.floor(startTime) : "none",
-      "demuxer-lavf-analyzeduration": "0.5",
-      "demuxer-lavf-probesize": "262144",
+      "demuxer-lavf-analyzeduration": "0.25",
+      "demuxer-lavf-probesize": "131072",
       cache: "yes",
       "cache-secs": "15",
-      "demuxer-readahead-secs": "5",
+      "demuxer-readahead-secs": "8",
+      "cache-pause-initial": "no",
+      "cache-pause-wait": "0.1",
+      "vd-lavc-threads": "0",
       "hls-bitrate": "max",
+      "force-media-title": sanitizeTitle(candidate.title || "Enhanced MPV"),
     };
     const headerOption = buildHeaderOption(candidate);
     if (headerOption) opts["http-header-fields"] = headerOption;
@@ -197,7 +203,7 @@ function canZeroWaitLaunch(candidateId, tabId) {
          pipelineState.stage === PipelineStage.SHADOW_READY;
 }
 
-async function executeZeroWaitLaunch(startTime, title) {
+async function executeZeroWaitLaunch(_startTime, _title) {
   const launchStart = Date.now();
 
   await connectPersistentSocket();
@@ -207,24 +213,14 @@ async function executeZeroWaitLaunch(startTime, title) {
 
   const commands = [
     ["set_property", "window-minimized", "no"],
-    ["set_property", "ontop", true],
-    ["script-message", "enhanced-mpv-loading", title || "Enhanced MPV"],
-    ["script-message", "enhanced-mpv-focus"],
-    ["seek", startTime && startTime > 0 ? startTime : 0, "absolute+exact"],
     ["set_property", "pause", false],
+    ["script-message", "enhanced-mpv-focus"],
   ];
 
-  for (const cmd of commands) {
-    const reply = await sendPersistentIpc(cmd, 300);
-    if (!reply || reply.error !== "success") {
-      appendLaunchLog("[" + new Date().toISOString() + "] hot path IPC failed on " + cmd[0]);
-      return false;
-    }
+  if (!flushIpcCommands(commands)) {
+    appendLaunchLog("[" + new Date().toISOString() + "] hot path IPC write failed");
+    return false;
   }
-
-  setTimeout(() => {
-    void sendPersistentIpc(["set_property", "ontop", false], 150).catch(() => {});
-  }, 500);
 
   const launchMs = Date.now() - launchStart;
   updatePipelineState({
@@ -236,7 +232,7 @@ async function executeZeroWaitLaunch(startTime, title) {
       setPipelineStage(PipelineStage.PLAYING);
     }
   }, 50);
-  appendLaunchLog(`[${new Date().toISOString()}] Zero-Wait HOT PATH: launch in ${launchMs}ms`);
+appendLaunchLog(`[${new Date().toISOString()}] Enhanced MPV v${RELEASE_VERSION} zero-wait launch in ${launchMs}ms`);
   return true;
 }
 
@@ -252,14 +248,16 @@ async function executeColdLaunch(candidate, startTime, title) {
 
   const opts = {
     start: startTime && startTime > 0 ? String(startTime) : "none",
-    "demuxer-lavf-analyzeduration": "0.5",
-    "demuxer-lavf-probesize": "262144",
+    "demuxer-lavf-analyzeduration": "0.25",
+    "demuxer-lavf-probesize": "131072",
     cache: "yes",
     "cache-secs": "15",
-    "demuxer-readahead-secs": "5",
+    "demuxer-readahead-secs": "8",
+    "cache-pause-wait": "0.1",
     "hls-bitrate": "max",
     "cache-pause-initial": "no",
     "initial-audio-sync": "no",
+    "force-media-title": sanitizeTitle(title || candidate.title || "Enhanced MPV"),
   };
   const headerOption = buildHeaderOption(candidate);
   if (headerOption) opts["http-header-fields"] = headerOption;
@@ -626,11 +624,14 @@ async function spawnStandbyMpv() {
     "--window-minimized=yes",
     "--no-terminal",
     "--input-ipc-server=" + IPC_PIPE_PATH,
-    "--demuxer-lavf-analyzeduration=0.5",
-    "--demuxer-lavf-probesize=262144",
+    "--demuxer-lavf-analyzeduration=0.25",
+    "--demuxer-lavf-probesize=131072",
     "--cache=yes",
     "--cache-secs=15",
-    "--demuxer-readahead-secs=5",
+    "--demuxer-readahead-secs=8",
+    "--cache-pause-initial=no",
+    "--cache-pause-wait=0.1",
+    "--vd-lavc-threads=0",
     "--hls-bitrate=max",
     "--log-file=" + path.join(configDir(), "mpv-runtime.log"),
   ];

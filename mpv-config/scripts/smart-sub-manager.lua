@@ -22,7 +22,7 @@ local opts = {
 }
 options.read_options(opts, "smart_sub_manager")
 
-local USER_AGENT = "EnhancedMPV v1.0.0"
+local USER_AGENT = "EnhancedMPV v1.1.0"
 local OS_API = "https://api.opensubtitles.com/api/v1"
 local last_candidates = {}
 local os_token = nil

@@ -12,8 +12,8 @@
 #ifndef ExtId
   #define ExtId "oaholhjabdiapfijakeojjjoideniecl"
 #endif
-#ifndef AppVersion
-  #define AppVersion "1.0.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "1.1.0"
 #endif
 
 #define HostName "com.enhanced.mpv.host"
@@ -23,8 +23,8 @@
 ArchiveExtraction=full
 AppId={{7E4C1A92-6B3D-4F58-9E21-C0A4D5F6B781}
 AppName=Enhanced MPV
-AppVersion={#AppVersion}
-AppVerName=Enhanced MPV {#AppVersion}
+AppVersion={#MyAppVersion}
+AppVerName=Enhanced MPV {#MyAppVersion}
 AppPublisher=Enhanced MPV
 AppPublisherURL=https://github.com/nihal6886/enhanced-mpv
 DefaultDirName={localappdata}\Programs\Enhanced MPV

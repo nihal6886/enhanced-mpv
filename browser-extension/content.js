@@ -489,6 +489,7 @@ function attachVideoHoverListeners() {
       currentHoverVideo = video;
       clearTimeout(hoverPillHideTimer);
       showHoverPill(video);
+      void safeRuntimeSendMessage({ type: "PREWARM_TOP_CANDIDATE" });
     });
     
     video.addEventListener("mousemove", () => {
